@@ -28,9 +28,8 @@ Deno.serve(
     const { pathname } = url
 
     // ── Client install files (public — no auth) ──────────────────────────────
-    const installMatch = pathname.match(/^\/install\/(claude-code|gemini-cli|qwen-code|opencode)$/)
-    if (installMatch && req.method === 'GET') {
-      return Response.redirect(`${url.origin}/client/${installMatch[1]}/install.ts`, 302)
+    if (pathname === '/install' && req.method === 'GET') {
+      return Response.redirect(`${url.origin}/client/install.ts`, 302)
     }
 
     if (pathname.startsWith('/client/') && req.method === 'GET') {

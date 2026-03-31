@@ -92,31 +92,28 @@ src/
         update_profile.ts
         delete_profile.ts
 
-client/               # Installed on each client machine; config lives in ~/.prunus/
-  shared/
-    mod.ts              # Shared Deno hook utilities (loadSettings, parseTranscript, runIngest, sweepMarkers, …)
+client/                 # Installed on each client machine; config lives in ~/.prunus/
+  install.ts            # Unified installer — prompts for tool, branches per tool
+  prunus.md             # /prunus command (source; transformed per tool at install time)
+  mod.ts                # Shared Deno hook utilities (loadSettings, parseTranscript, runIngest, sweepMarkers, …)
   claude-code/
-    install.ts          # Copies hooks + shared mod, writes ~/.prunus/settings.json, updates ~/.claude/settings.json
     hooks/
       user-prompt-submit.ts  # First-turn context injection
       stop.ts                # Session-end ingest
       pre-compact.ts         # Pre-compaction ingest + last-ingested marker
   gemini-cli/
-    install.ts          # Copies hooks + shared mod, writes ~/.prunus/settings.json, updates ~/.gemini/settings.json
     hooks/
       before-agent.ts        # First-turn context injection (BeforeAgent event)
       session-end.ts         # Session-end ingest (SessionEnd event)
       pre-compress.ts        # Pre-compression ingest (PreCompress event)
   qwen-code/
-    install.ts          # Copies hooks + shared mod, writes ~/.prunus/settings.json, updates ~/.qwen/settings.json
     hooks/
       user-prompt-submit.ts  # First-turn context injection (hookSpecificOutput.additionalContext)
       session-end.ts         # Session-end ingest (SessionEnd event, fires once on exit)
       pre-compact.ts         # Pre-compaction ingest + marker
   opencode/
-    install.ts          # Copies plugin to ~/.config/opencode/plugins/ (auto-discovered);
-                        # registers MCP in ~/.config/opencode/opencode.json under "mcp" key
-    plugin.ts           # TS plugin: ingest on session.idle; context inject at experimental.session.compacting
+    plugins/
+      prunus.ts              # TS plugin: ingest on session.idle; context inject at experimental.session.compacting
 ```
 
 ## HTTP Routes
@@ -124,19 +121,17 @@ client/               # Installed on each client machine; config lives in ~/.pru
 ```
 GET  /                             probe (no auth)
 GET  /health                       {status, db, embed_service, queue_depth}
-GET  /install/{tool}               redirect to /client/{tool}/install.ts (no auth)
+GET  /install                      redirect to /client/install.ts (no auth)
 GET  /client/{path}                serve client install files (no auth)
 GET  /vaults/{vault}/context       returns profile for first-turn hook injection
 POST /vaults/{vault}/ingest        {project, transcript, since?} → {saved, skipped}
 POST /mcp                          MCP JSON-RPC endpoint
 ```
 
-`{tool}` is one of: `claude-code`, `gemini-cli`, `qwen-code`, `opencode`
-
 Install on a client machine:
 
 ```sh
-deno run --allow-all http://prunus-host:9100/install/claude-code
+deno run --allow-all http://prunus-host:9100/install
 ```
 
 ## Database Schema (both backends)
