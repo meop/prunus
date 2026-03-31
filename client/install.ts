@@ -92,8 +92,8 @@ async function copyOrFetch(src: string, dest: string): Promise<void> {
 async function installSharedFiles(): Promise<void> {
   const hooksDir = join(PRUNUS_DIR, 'hooks')
   await Deno.mkdir(hooksDir, { recursive: true })
-  await copyOrFetch(new URL('mod.ts', BASE_URL).href, join(hooksDir, 'mod.ts'))
-  await copyOrFetch(new URL('hooks.json', BASE_URL).href, join(hooksDir, 'deno.json'))
+  await copyOrFetch(new URL('hooks/mod.ts', BASE_URL).href, join(hooksDir, 'mod.ts'))
+  await copyOrFetch(new URL('hooks/deno.json', BASE_URL).href, join(hooksDir, 'deno.json'))
 }
 
 async function installCommand(
@@ -235,7 +235,7 @@ if (tool === 'claude-code') {
   await installSharedFiles()
   await Deno.mkdir(HOOKS_DIR, { recursive: true })
   for (const hook of ['user-prompt-submit.ts', 'stop.ts', 'pre-compact.ts']) {
-    await copyOrFetch(new URL(`claude-code/hooks/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
+    await copyOrFetch(new URL(`hooks/claude-code/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
   }
   await cacheHooks([
     join(HOOKS_DIR, 'user-prompt-submit.ts'),
@@ -282,7 +282,7 @@ if (tool === 'gemini-cli') {
   await installSharedFiles()
   await Deno.mkdir(HOOKS_DIR, { recursive: true })
   for (const hook of ['before-agent.ts', 'session-end.ts', 'pre-compress.ts']) {
-    await copyOrFetch(new URL(`gemini-cli/hooks/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
+    await copyOrFetch(new URL(`hooks/gemini-cli/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
   }
   await cacheHooks([
     join(HOOKS_DIR, 'before-agent.ts'),
@@ -329,7 +329,7 @@ if (tool === 'qwen-code') {
   await installSharedFiles()
   await Deno.mkdir(HOOKS_DIR, { recursive: true })
   for (const hook of ['user-prompt-submit.ts', 'session-end.ts', 'pre-compact.ts']) {
-    await copyOrFetch(new URL(`qwen-code/hooks/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
+    await copyOrFetch(new URL(`hooks/qwen-code/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
   }
   await cacheHooks([
     join(HOOKS_DIR, 'user-prompt-submit.ts'),
@@ -365,7 +365,7 @@ if (tool === 'opencode') {
   await writeJsonFile(OPENCODE_JSON, config)
 
   await Deno.mkdir(PLUGIN_DIR, { recursive: true })
-  await copyOrFetch(new URL('opencode/plugins/prunus.ts', BASE_URL).href, join(PLUGIN_DIR, 'prunus.ts'))
+  await copyOrFetch(new URL('plugins/opencode/prunus.ts', BASE_URL).href, join(PLUGIN_DIR, 'prunus.ts'))
 
   console.log('restart opencode for plugin and mcp to take effect')
 }
