@@ -3,7 +3,7 @@
  *
  * Imported by all client hooks. Cross-platform: Windows, macOS, Linux.
  * Install structure expected at runtime:
- *   ~/.prunus/hooks/shared/mod.ts
+ *   ~/.prunus/hooks/mod.ts
  *   ~/.prunus/hooks/{tool}/{hook}.ts  ← these import ../mod.ts
  */
 

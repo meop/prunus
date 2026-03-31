@@ -86,13 +86,14 @@ async function writeFile(dest: string, getContent: () => Promise<string>): Promi
 
 async function copyOrFetch(src: string, dest: string): Promise<void> {
   await Deno.writeTextFile(dest, await fetchContent(src))
+  console.log(`wrote ${dest}`)
 }
 
 async function installSharedFiles(): Promise<void> {
-  const sharedDir = join(PRUNUS_DIR, 'hooks', 'shared')
-  await Deno.mkdir(sharedDir, { recursive: true })
-  await copyOrFetch(new URL('mod.ts', BASE_URL).href, join(sharedDir, 'mod.ts'))
-  await copyOrFetch(new URL('hooks-deno.json', BASE_URL).href, join(PRUNUS_DIR, 'hooks', 'deno.json'))
+  const hooksDir = join(PRUNUS_DIR, 'hooks')
+  await Deno.mkdir(hooksDir, { recursive: true })
+  await copyOrFetch(new URL('mod.ts', BASE_URL).href, join(hooksDir, 'mod.ts'))
+  await copyOrFetch(new URL('hooks.json', BASE_URL).href, join(hooksDir, 'deno.json'))
 }
 
 async function installCommand(
@@ -139,26 +140,69 @@ async function writeUserSettings(serverUrl: string, authToken: string): Promise<
 
 // ── tool selection ────────────────────────────────────────────────────────────
 
-const TOOLS = ['claude-code', 'gemini-cli', 'qwen-code', 'opencode'] as const
-type Tool = typeof TOOLS[number]
+// tool name → binary name in PATH
+const TOOLS: Record<string, string> = {
+  'claude-code': 'claude',
+  'gemini-cli': 'gemini',
+  'opencode': 'opencode',
+  'qwen-code': 'qwen',
+}
+type Tool = keyof typeof TOOLS
 
-function isTool(s: string): s is Tool {
-  return (TOOLS as readonly string[]).includes(s)
+function parseTools(input: string): Tool[] {
+  const names = input.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  if (names.length === 0) {
+    console.error('no tools specified')
+    Deno.exit(1)
+  }
+  const invalid = names.filter((n) => !(n in TOOLS))
+  if (invalid.length) {
+    console.error(`unknown tool(s): ${invalid.join(', ')}`)
+    Deno.exit(1)
+  }
+  return names
 }
 
-let tool = Deno.args[0]?.trim().toLowerCase() ?? ''
-if (!isTool(tool)) {
-  tool = ask(`? tool [${TOOLS.join(' | ')}]:`).trim().toLowerCase()
-  if (!isTool(tool)) {
-    console.error(`unknown tool: ${tool}`)
+async function inPath(bin: string): Promise<boolean> {
+  try {
+    const cmd = isWindows ? 'where' : 'which'
+    const { code } = await new Deno.Command(cmd, { args: [bin], stdout: 'null', stderr: 'null' }).output()
+    return code === 0
+  } catch {
+    return false
+  }
+}
+
+async function defaultTools(): Promise<Tool[]> {
+  const found: Tool[] = []
+  for (const tool of Object.keys(TOOLS)) {
+    if (await inPath(TOOLS[tool])) found.push(tool)
+  }
+  return found
+}
+
+let tools: Tool[]
+if (Deno.args.length > 0) {
+  tools = parseTools(Deno.args.join(' '))
+} else {
+  const detected = await defaultTools()
+  const detectedStr = detected.length ? detected.join(' ') : ''
+  const input = ask(`? tools [${Object.keys(TOOLS).join(' | ')}]${detectedStr ? ` (${detectedStr}):` : ':'}`).trim()
+  tools = input ? parseTools(input) : detected
+  if (tools.length === 0) {
+    console.error('no installed tools detected and none specified')
     Deno.exit(1)
   }
 }
 
-console.log(`\n=== prunus install ${tool} ===\n`)
-
 const { prunusUrl, authToken } = await promptConfig()
+await writeUserSettings(prunusUrl, authToken)
 console.log('')
+
+for (let i = 0; i < tools.length; i++) {
+  const tool = tools[i]
+  if (i > 0) console.log('')
+  console.log(`=== prunus install ${tool} ===`)
 
 // ── claude-code ───────────────────────────────────────────────────────────────
 
@@ -167,19 +211,7 @@ if (tool === 'claude-code') {
   const HOOKS_DIR = join(PRUNUS_DIR, 'hooks', 'claude-code')
   const CLAUDE_SETTINGS = join(CLAUDE_DIR, 'settings.json')
 
-  await installSharedFiles()
-  await Deno.mkdir(HOOKS_DIR, { recursive: true })
-  for (const hook of ['user-prompt-submit.ts', 'stop.ts', 'pre-compact.ts']) {
-    await copyOrFetch(new URL(`claude-code/hooks/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
-  }
-
-  await writeUserSettings(prunusUrl, authToken)
   await installCommand(new URL('prunus.md', BASE_URL).href, join(CLAUDE_DIR, 'commands'))
-  await cacheHooks([
-    join(HOOKS_DIR, 'user-prompt-submit.ts'),
-    join(HOOKS_DIR, 'stop.ts'),
-    join(HOOKS_DIR, 'pre-compact.ts'),
-  ])
 
   const settings = await readJsonFile(CLAUDE_SETTINGS)
   const hooks = (settings.hooks ?? {}) as Record<string, unknown>
@@ -200,9 +232,18 @@ if (tool === 'claude-code') {
 
   await writeJsonFile(CLAUDE_SETTINGS, settings)
 
-  console.log('')
+  await installSharedFiles()
+  await Deno.mkdir(HOOKS_DIR, { recursive: true })
+  for (const hook of ['user-prompt-submit.ts', 'stop.ts', 'pre-compact.ts']) {
+    await copyOrFetch(new URL(`claude-code/hooks/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
+  }
+  await cacheHooks([
+    join(HOOKS_DIR, 'user-prompt-submit.ts'),
+    join(HOOKS_DIR, 'stop.ts'),
+    join(HOOKS_DIR, 'pre-compact.ts'),
+  ])
+
   console.log('restart claude-code for hooks and mcp to take effect')
-  console.log('run /prunus to init a new project')
 }
 
 // ── gemini-cli ────────────────────────────────────────────────────────────────
@@ -212,23 +253,11 @@ if (tool === 'gemini-cli') {
   const HOOKS_DIR = join(PRUNUS_DIR, 'hooks', 'gemini-cli')
   const GEMINI_SETTINGS = join(GEMINI_DIR, 'settings.json')
 
-  await installSharedFiles()
-  await Deno.mkdir(HOOKS_DIR, { recursive: true })
-  for (const hook of ['before-agent.ts', 'session-end.ts', 'pre-compress.ts']) {
-    await copyOrFetch(new URL(`gemini-cli/hooks/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
-  }
-
-  await writeUserSettings(prunusUrl, authToken)
   await installCommand(
     new URL('prunus.md', BASE_URL).href,
     join(GEMINI_DIR, 'commands'),
     (s) => s.replaceAll('$ARGUMENTS', '{{args}}').replaceAll('in Bash', 'in a shell').replaceAll('Use Bash only', 'Use shell only'),
   )
-  await cacheHooks([
-    join(HOOKS_DIR, 'before-agent.ts'),
-    join(HOOKS_DIR, 'session-end.ts'),
-    join(HOOKS_DIR, 'pre-compress.ts'),
-  ])
 
   const settings = await readJsonFile(GEMINI_SETTINGS)
   const hooks = (settings.hooks ?? {}) as Record<string, unknown>
@@ -250,9 +279,18 @@ if (tool === 'gemini-cli') {
 
   await writeJsonFile(GEMINI_SETTINGS, settings)
 
-  console.log('')
+  await installSharedFiles()
+  await Deno.mkdir(HOOKS_DIR, { recursive: true })
+  for (const hook of ['before-agent.ts', 'session-end.ts', 'pre-compress.ts']) {
+    await copyOrFetch(new URL(`gemini-cli/hooks/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
+  }
+  await cacheHooks([
+    join(HOOKS_DIR, 'before-agent.ts'),
+    join(HOOKS_DIR, 'session-end.ts'),
+    join(HOOKS_DIR, 'pre-compress.ts'),
+  ])
+
   console.log('restart gemini-cli for hooks and mcp to take effect')
-  console.log('run /prunus to init a new project')
 }
 
 // ── qwen-code ─────────────────────────────────────────────────────────────────
@@ -262,23 +300,11 @@ if (tool === 'qwen-code') {
   const HOOKS_DIR = join(PRUNUS_DIR, 'hooks', 'qwen-code')
   const QWEN_SETTINGS = join(QWEN_DIR, 'settings.json')
 
-  await installSharedFiles()
-  await Deno.mkdir(HOOKS_DIR, { recursive: true })
-  for (const hook of ['user-prompt-submit.ts', 'session-end.ts', 'pre-compact.ts']) {
-    await copyOrFetch(new URL(`qwen-code/hooks/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
-  }
-
-  await writeUserSettings(prunusUrl, authToken)
   await installCommand(
     new URL('prunus.md', BASE_URL).href,
     join(QWEN_DIR, 'commands'),
     (s) => s.replaceAll('$ARGUMENTS', '{{args}}').replaceAll('in Bash', 'in a shell').replaceAll('Use Bash only', 'Use shell only'),
   )
-  await cacheHooks([
-    join(HOOKS_DIR, 'user-prompt-submit.ts'),
-    join(HOOKS_DIR, 'session-end.ts'),
-    join(HOOKS_DIR, 'pre-compact.ts'),
-  ])
 
   const settings = await readJsonFile(QWEN_SETTINGS)
   const hooks = (settings.hooks ?? {}) as Record<string, unknown>
@@ -300,9 +326,18 @@ if (tool === 'qwen-code') {
 
   await writeJsonFile(QWEN_SETTINGS, settings)
 
-  console.log('')
+  await installSharedFiles()
+  await Deno.mkdir(HOOKS_DIR, { recursive: true })
+  for (const hook of ['user-prompt-submit.ts', 'session-end.ts', 'pre-compact.ts']) {
+    await copyOrFetch(new URL(`qwen-code/hooks/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
+  }
+  await cacheHooks([
+    join(HOOKS_DIR, 'user-prompt-submit.ts'),
+    join(HOOKS_DIR, 'session-end.ts'),
+    join(HOOKS_DIR, 'pre-compact.ts'),
+  ])
+
   console.log('restart qwen-code for hooks and mcp to take effect')
-  console.log('run /prunus to init a new project')
 }
 
 // ── opencode ──────────────────────────────────────────────────────────────────
@@ -312,10 +347,6 @@ if (tool === 'opencode') {
   const PLUGIN_DIR = join(OPENCODE_CONFIG, 'plugins')
   const OPENCODE_JSON = join(OPENCODE_CONFIG, 'opencode.json')
 
-  await Deno.mkdir(PLUGIN_DIR, { recursive: true })
-  await copyOrFetch(new URL('opencode/plugins/prunus.ts', BASE_URL).href, join(PLUGIN_DIR, 'prunus.ts'))
-
-  await writeUserSettings(prunusUrl, authToken)
   await installCommand(
     new URL('prunus.md', BASE_URL).href,
     join(OPENCODE_CONFIG, 'commands'),
@@ -333,7 +364,13 @@ if (tool === 'opencode') {
 
   await writeJsonFile(OPENCODE_JSON, config)
 
-  console.log('')
+  await Deno.mkdir(PLUGIN_DIR, { recursive: true })
+  await copyOrFetch(new URL('opencode/plugins/prunus.ts', BASE_URL).href, join(PLUGIN_DIR, 'prunus.ts'))
+
   console.log('restart opencode for plugin and mcp to take effect')
-  console.log('run /prunus to init a new project')
 }
+
+} // end for (const tool of tools)
+
+console.log('')
+console.log('run \`/prunus init\` to init a new project')
