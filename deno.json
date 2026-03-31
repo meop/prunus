@@ -1,0 +1,32 @@
+{
+  "fmt": {
+    "lineWidth": 120,
+    "semiColons": false,
+    "singleQuote": true,
+    "trailingCommas": "onlyMultiLine"
+  },
+  "imports": {
+    "@db/postgres": "jsr:@db/postgres@^0.19.5",
+    "@db/sqlite": "jsr:@db/sqlite@^0.13.0",
+    "@modelcontextprotocol/sdk": "npm:@modelcontextprotocol/sdk@^1.28.0",
+    "@std/fs": "jsr:@std/fs@^1.0.23",
+    "@std/path": "jsr:@std/path@^1.1.4",
+    "@std/toml": "jsr:@std/toml@^1.0.4",
+    "zod": "npm:zod@^4.3.6"
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"]
+    }
+  },
+  "tasks": {
+    "dev": "deno run --allow-all --watch src/srv.ts",
+    "dev:systemd:up": "bash .systemd/user.sh up",
+    "dev:systemd:down": "bash .systemd/user.sh down",
+    "fmt": "deno fmt",
+    "fmt:check": "deno fmt --check",
+    "lint": "deno lint",
+    "check": "deno check src/srv.ts",
+    "test": "PRUNUS_ENV=test deno test --allow-all"
+  }
+}

@@ -1,0 +1,51 @@
+# https://raw.githubusercontent.com/github/gitignore/HEAD/Deno.gitignore
+
+# Dependency directory
+node_modules/
+
+# Local history for Visual Studio Code
+.history/
+*.vsix
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# Deno
+.deno/
+
+# Editor directories and files
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Logs
+*.log
+
+# dotenv environment variable files
+.env
+.env.local
+
+# settings symlink (points to settings-dev.toml)
+settings.toml
+
+# project
+prunus.db
+.vault/

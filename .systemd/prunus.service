@@ -1,0 +1,13 @@
+[Unit]
+Description=prunus server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={PRUNUS_DIR}
+ExecStart={DENO_BIN} run --allow-all src/srv.ts
+Restart=on-failure
+Environment=HOME=%h
+
+[Install]
+WantedBy=default.target
