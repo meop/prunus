@@ -16,14 +16,15 @@ Session ends
                  └─ Auto-save as Markdown → index → available for future sessions
 ```
 
-On the next session, the UserPromptSubmit hook injects the vault profile as context. Claude then calls `search_notes` or
-`read_note` via MCP when it needs specific knowledge.
+On each prompt submit, the UserPromptSubmit hook queries the vault for relevant notes and injects their summaries as
+context, with a hint to use `read_note` for full content. Claude then calls `search_notes` or `read_note` via MCP when
+it needs specific knowledge.
 
 ## Architecture
 
 | Component                 | Role                                                                            |
 | ------------------------- | ------------------------------------------------------------------------------- |
-| **Deno HTTP server**      | MCP at `/mcp`, ingest at `/vaults/{vault}/ingest`, health/context endpoints     |
+| **Deno HTTP server**      | MCP at `/mcp`, ingest at `/vault/{vault}/ingest`, health/context endpoints      |
 | **SQLite** (default)      | Metadata + FTS5 + JS-side cosine similarity — zero external dependencies        |
 | **PostgreSQL + pgvector** | Optional — HNSW index + generated TSVECTOR for larger deployments               |
 | **OpenAI-compatible API** | Embed model for search; chat model for note extraction (e.g. Ollama, LM Studio) |
@@ -34,21 +35,16 @@ files.
 
 ## MCP Tools
 
-| Tool             | Description                                                 |
-| ---------------- | ----------------------------------------------------------- |
-| `search_notes`   | Hybrid vector + FTS search across all notes in the vault    |
-| `read_note`      | Read a note's full Markdown content                         |
-| `create_note`    | Save a note, merge project history, enqueue for indexing    |
-| `update_note`    | Update content without changing identity or project history |
-| `delete_note`    | Delete a note from vault and index                          |
-| `suggest_links`  | Suggest existing notes for `[[wikilinks]]`                  |
-| `list_vaults`    | List available vault names                                  |
-| `create_vault`   | Create a new named vault directory                          |
-| `delete_vault`   | Delete a vault and all its contents                         |
-| `list_profiles`  | List profiles in a vault                                    |
-| `create_profile` | Create a new profile file                                   |
-| `update_profile` | Update an existing profile file                             |
-| `delete_profile` | Delete a profile file                                       |
+| Tool              | Description                                              |
+| ----------------- | -------------------------------------------------------- |
+| `search_notes`    | Hybrid vector + FTS search across all notes in the vault |
+| `read_note`       | Read a note's full Markdown content                      |
+| `list_vaults`     | List available vault names                               |
+| `create_vault`    | Create a new named vault directory                       |
+| `delete_vault`    | Delete a vault and all its contents                      |
+| `list_profiles`   | List all profiles + which are enabled for a vault        |
+| `enable_profile`  | Enable a profile for a vault (create symlink)            |
+| `disable_profile` | Disable a profile for a vault (remove symlink)           |
 
 ## Setup
 
@@ -66,8 +62,7 @@ For PostgreSQL, set `db.type = "postgres"` and fill in the `[db.postgres]` secti
 ### Client (Claude Code)
 
 ```sh
-cd client
-./install.sh
+deno run --allow-all src/cli/install.ts
 # prompts for server URL, default vault, auth token
 # installs hooks and patches ~/.claude/settings.json
 ```
@@ -115,7 +110,7 @@ level = "info"   # debug | info | warn | error
 type = "sqlite"   # sqlite | postgres
 
 [db.sqlite]
-path = "/path/to/prunus.db"
+path = "/path/to/data"
 
 # [db.postgres]
 # hostname = "..." port = 5432 database = "prunus" user = "..." password = "..."
@@ -142,8 +137,8 @@ path = "/path/to/vaults"   # required; each subdirectory is a named vault
 
 Client hooks read JSON config (no `.env` files). Settings are layered:
 
-- `~/.prunus/settings.json` — user-level (serverUrl, authToken, default vault, profile, markerTtlDays)
-- `.prunus/settings.json` (walk up from cwd) — project-level (vault, enabled, project, profile)
+- `~/.prunus/settings.json` — user-level (serverUrl, authToken, default vault, markerTtlDays)
+- `.prunus/settings.json` (walk up from cwd) — project-level (vault, enabled, project)
 
 ```json
 {
@@ -151,13 +146,11 @@ Client hooks read JSON config (no `.env` files). Settings are layered:
   "authToken": "...",
   "vault": "code",
   "enabled": true,
-  "profile": "default",
   "markerTtlDays": 30
 }
 ```
 
-The `profile` field is optional. When set, the hook fetches the named profile from `{vault}/.prunus/profiles/{name}.md`
-and injects it as context at session start. Profiles are off by default.
+Profiles are enabled server-side via symlinks in `{vault}/.profiles/`.
 
 ## Development
 

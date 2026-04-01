@@ -10,13 +10,9 @@ installer — do not modify those fields here.
 {
   "vault": "code",
   "enabled": true,
-  "project": "optional-name-override",
-  "profile": "software-architect"
+  "project": "optional-name-override"
 }
 ```
-
-`profile` is off by default (empty string). When set, the named profile is loaded from the vault on the server
-(`{vault}/.prunus/profiles/{name}.md`) and injected as context on the first turn and used to guide ingest extraction.
 
 **Steps — read $ARGUMENTS and act accordingly:**
 
@@ -48,20 +44,6 @@ First, run `pwd` in Bash to get the current working directory. Then:
 1. Walk up from cwd to find the nearest `.prunus/settings.json`
 2. If none found, create `.prunus/settings.json` in cwd
 3. Read existing JSON (or start with `{}`), set `"vault": "<name>"`, write back
-4. Confirm the path updated
-
-**"profile \<name\>":**
-
-1. Walk up from cwd to find the nearest `.prunus/settings.json`
-2. If none found, create `.prunus/settings.json` in cwd
-3. Read existing JSON (or start with `{}`), set `"profile": "<name>"`, write back
-4. Confirm the path updated
-
-**"profile off":**
-
-1. Walk up from cwd to find the nearest `.prunus/settings.json`
-2. If none found, create `.prunus/settings.json` in cwd
-3. Read existing JSON (or start with `{}`), set `"profile": ""`, write back
 4. Confirm the path updated
 
 **"init":**

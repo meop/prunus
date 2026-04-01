@@ -1,13 +1,14 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { readNote } from '../../../vault/reader.ts'
+
 import { getStore } from '../../../db/index.ts'
 import { buildNoteContent } from '../../../vault/parser.ts'
+import { readNote } from '../../../vault/reader.ts'
 
 export function register(server: McpServer): void {
   server.tool(
     'read_note',
-    'Read a note from the vault by path or by ID. Returns the full Markdown content.',
+    'Read a note from the vault by path or by ID. Returns the full Markdown content. Notes may contain [[wikilinks]] and a "## See also" section — follow those links with additional read_note calls to retrieve related knowledge.',
     {
       vault: z.string().describe('Vault name'),
       path: z.string().optional().describe('Vault-relative path (e.g. typescript/decorators.md)'),

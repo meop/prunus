@@ -243,6 +243,34 @@ export class PgStore implements Store {
     }
   }
 
+  async getNoteEmbed(vault: string, path: string): Promise<number[] | null> {
+    const client = await this.pool.connect()
+    try {
+      const res = await client.queryObject<{ embed: string | null }>(
+        `SELECT embed::text FROM notes WHERE vault = $1 AND path = $2`,
+        [vault, path],
+      )
+      const embed = res.rows[0]?.embed
+      if (!embed) return null
+      return embed.slice(1, -1).split(',').map(Number)
+    } finally {
+      client.release()
+    }
+  }
+
+  async getSourcesLinkingTo(targetId: string): Promise<Array<{ id: string; vault: string; path: string }>> {
+    const client = await this.pool.connect()
+    try {
+      const res = await client.queryObject<{ id: string; vault: string; path: string }>(
+        `SELECT n.id, n.vault, n.path FROM links l JOIN notes n ON l.source_id = n.id WHERE l.target_id = $1`,
+        [targetId],
+      )
+      return res.rows
+    } finally {
+      client.release()
+    }
+  }
+
   async upsertLinks(sourceId: string, targets: Array<{ targetId: string; type: string }>): Promise<void> {
     const client = await this.pool.connect()
     try {

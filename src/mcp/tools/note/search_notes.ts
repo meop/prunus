@@ -1,8 +1,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { embed } from '../../../llm/embed.ts'
-import { getStore } from '../../../db/index.ts'
+
 import { config } from '../../../config.ts'
+import { getStore } from '../../../db/index.ts'
+import { embed } from '../../../llm/embed.ts'
 
 export function register(server: McpServer): void {
   server.tool(

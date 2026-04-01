@@ -1,14 +1,11 @@
+import { walk } from '@std/fs'
 import { join } from '@std/path'
+
 import { config } from '../config.ts'
-import { getStore } from '../db/index.ts'
-import { enqueue } from '../queue.ts'
 import { chat } from '../llm/chat.ts'
-import { embed } from '../llm/embed.ts'
 import { log } from '../log.ts'
-import { commitBatch } from '../vault/git.ts'
-import { emptyFrontmatter, parseFrontmatter } from '../vault/parser.ts'
+import { enqueue } from '../queue.ts'
 import { loadProfile } from '../vault/profiles.ts'
-import { writeNote } from '../vault/writer.ts'
 
 export interface TranscriptEntry {
   role: 'user' | 'assistant'
@@ -19,154 +16,111 @@ export interface TranscriptEntry {
 export interface IngestRequest {
   project: string
   transcript: TranscriptEntry[]
-  since?: string // ISO timestamp — only process entries after this point
-  profile?: string // name of capture profile to use (e.g. "software-architect")
+  since?: string
 }
 
 export interface IngestResult {
-  saved: Array<{ path: string; summary: string }>
-  skipped: number
+  chunks: number
 }
 
-interface Note {
-  filename: string
-  summary: string
-  content: string
-  tags: string[]
+interface Chunk {
+  topic: string
+  excerpt: string
 }
 
-const SYSTEM_PROMPT = `You are a knowledge extraction assistant for a developer's personal vault.
+const ANALYSIS_PROMPT =
+  `You are analyzing a developer's session transcript to identify distinct pieces of knowledge worth saving to the vault.
 {{profile}}
-Your task: analyze the conversation transcript below and extract 0-5 insights worth saving as reusable notes.
+For each piece of knowledge, provide:
+- "topic": 1-2 sentence description of what was learned
+- "excerpt": the relevant portion of the transcript that captures this knowledge (verbatim or lightly edited, enough context to reconstruct the insight)
 
-Focus on: solutions to specific problems, reusable patterns, architecture decisions, gotchas, configuration details.
-Skip: small talk, exploratory dead ends, obvious things, one-off project-specific business logic.
+Be selective — only extract knowledge matching the vault profile above.
+Each chunk should be self-contained: a reader with no other context should understand what was learned.
 
-Respond with ONLY a JSON array (empty array if nothing is worth saving):
-[
-  {
-    "filename": "category/descriptive-name.md",
-    "summary": "2-3 sentence summary for search indexing. Be specific.",
-    "content": "Full markdown content. Include code, commands, caveats. Be detailed enough to be useful later.",
-    "tags": ["tag1", "tag2"]
+Respond with JSON only (empty array if nothing worth saving):
+[{"topic": "...", "excerpt": "..."}]`
+
+async function listVaultFiles(vault: string): Promise<string[]> {
+  const vaultPath = join(config.vault.base, vault)
+  const files: string[] = []
+  try {
+    for await (const entry of walk(vaultPath, { exts: ['.md'], includeDirs: false })) {
+      files.push(entry.path.slice(vaultPath.length + 1))
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e
   }
-]`
+  return files.sort()
+}
 
 export async function ingest(vault: string, req: IngestRequest): Promise<IngestResult> {
   if (!config.llm.chatModel) {
-    log.warn('ingest', 'llm.chat.model not set — skipping extraction')
-    return { saved: [], skipped: 0 }
+    log.warn('ingest', 'llm.chat.model not set — skipping')
+    return { chunks: 0 }
   }
 
-  // Filter transcript to entries since the last ingest (for PreCompact deduplication)
   let entries = req.transcript
   if (req.since) {
     const since = new Date(req.since).getTime()
     entries = entries.filter((e) => !e.ts || new Date(e.ts).getTime() > since)
   }
+  if (entries.length < 2) return { chunks: 0 }
 
-  if (entries.length < 2) return { saved: [], skipped: 0 }
+  const [profile, vaultFiles] = await Promise.all([loadProfile(vault), listVaultFiles(vault)])
 
-  const profile = await loadProfile(vault, req.profile ?? '')
+  if (!profile) {
+    log.info('ingest', `vault=${vault} has no active profiles — skipping`)
+    return { chunks: 0 }
+  }
+
+  log.info('ingest', `analyzing ${entries.length} turns for vault=${vault} project=${req.project}`)
+
   const transcriptText = entries.map((e) => `${e.role.toUpperCase()}: ${e.content}`).join('\n\n')
+  const profileSection = `\nVAULT PROFILE:\n${profile}\n`
+  const systemPrompt = ANALYSIS_PROMPT.replace('{{profile}}', profileSection)
+  const vaultSection = vaultFiles.length > 0
+    ? `\nCurrent vault files:\n${vaultFiles.map((f) => `  ${f}`).join('\n')}\n`
+    : ''
 
-  log.info('ingest', `extracting from ${entries.length} turns for vault=${vault} project=${req.project}`)
-
-  let notes: Note[] = []
+  let chunks: Chunk[] = []
   try {
-    const profileSection = profile ? `\nVAULT PROFILE (what to capture and what to skip):\n${profile}\n` : ''
-    const systemPrompt = SYSTEM_PROMPT.replace('{{profile}}', profileSection)
     const response = await chat([
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: `Project: ${req.project}\n\nTranscript:\n${transcriptText}` },
+      { role: 'user', content: `Project: ${req.project}${vaultSection}\nTranscript:\n${transcriptText}` },
     ])
-    notes = parseNotes(response)
+    chunks = parseChunks(response)
   } catch (err) {
-    log.error('ingest', 'LLM extraction failed', String(err))
-    return { saved: [], skipped: 0 }
+    log.error('ingest', 'analysis failed', String(err))
+    return { chunks: 0 }
   }
 
-  if (notes.length === 0) {
-    log.info('ingest', 'no notes extracted')
-    return { saved: [], skipped: 0 }
+  if (chunks.length === 0) {
+    log.info('ingest', 'no knowledge chunks identified')
+    return { chunks: 0 }
   }
 
-  log.info('ingest', `extracted ${notes.length} candidate(s)`)
+  log.info('ingest', `identified ${chunks.length} chunk(s) — enqueueing jobs`)
 
-  const store = getStore()
-  const saved: Array<{ path: string; summary: string }> = []
-  let skipped = 0
-
-  for (const note of notes) {
-    if (!note.filename || !note.summary || !note.content) continue
-
-    // Dedup check
-    try {
-      const noteEmbed = await embed(note.summary)
-      const isDup = await store.checkDuplicate(vault, noteEmbed, config.search.dedupThreshold)
-      if (isDup) {
-        log.debug('ingest', `duplicate skipped: ${note.filename}`)
-        skipped++
-        continue
-      }
-    } catch (err) {
-      log.warn('ingest', `dedup check failed for ${note.filename} — saving anyway`, String(err))
-    }
-
-    // Read existing note if it exists (to preserve frontmatter)
-    const vaultFilePath = join(config.vault.base, vault, note.filename)
-    let fm = emptyFrontmatter()
-    try {
-      const existing = await Deno.readTextFile(vaultFilePath)
-      const parsed = parseFrontmatter(existing)
-      fm = {
-        ...parsed.frontmatter,
-        summary: note.summary,
-        updated: new Date().toISOString(),
-        projects: [...new Set([...parsed.frontmatter.projects, req.project])],
-        tags: note.tags ?? parsed.frontmatter.tags,
-      }
-    } catch (e) {
-      if (!(e instanceof Deno.errors.NotFound)) {
-        throw e
-      }
-      fm = {
-        ...fm,
-        summary: note.summary,
-        projects: [req.project],
-        tags: note.tags ?? [],
-      }
-    }
-
-    await writeNote(vault, note.filename, fm, note.content)
-    enqueue({ type: 'reindex', vault, path: note.filename })
-    saved.push({ path: note.filename, summary: note.summary })
-    log.info('ingest', `saved: ${vault}/${note.filename}`)
+  for (const chunk of chunks) {
+    enqueue({ type: 'prune', vault, topic: chunk.topic, excerpt: chunk.excerpt })
   }
 
-  if (saved.length > 0) {
-    const vaultPath = join(config.vault.base, vault)
-    const msg = `ingest: ${saved.length} note(s) from ${req.project}`
-    await commitBatch(vaultPath, saved.map((s) => s.path), msg)
-  }
-
-  return { saved, skipped }
+  return { chunks: chunks.length }
 }
 
-function parseNotes(text: string): Note[] {
-  // Extract JSON array from response (model may wrap it in markdown code blocks)
+function parseChunks(text: string): Chunk[] {
   const match = text.match(/\[[\s\S]*\]/)
   if (!match) return []
   try {
     const parsed = JSON.parse(match[0])
     if (!Array.isArray(parsed)) return []
-    return parsed.filter((x): x is Note =>
+    return parsed.filter((x): x is Chunk =>
       typeof x === 'object' && x !== null &&
-      typeof x.filename === 'string' &&
-      typeof x.summary === 'string' &&
-      typeof x.content === 'string'
+      typeof x.topic === 'string' &&
+      typeof x.excerpt === 'string'
     )
-  } catch (_e) {
+  } catch {
     return []
   }
 }

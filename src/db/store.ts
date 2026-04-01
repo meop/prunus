@@ -49,4 +49,6 @@ export interface Store {
 
   resolveNoteTarget(vault: string, target: string): Promise<string | null>
   upsertLinks(sourceId: string, targets: Array<{ targetId: string; type: string }>): Promise<void>
+  getNoteEmbed(vault: string, path: string): Promise<number[] | null>
+  getSourcesLinkingTo(targetId: string): Promise<Array<{ id: string; vault: string; path: string }>>
 }

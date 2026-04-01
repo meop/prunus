@@ -36,8 +36,10 @@ export interface Settings {
       dimension?: number
     }
   }
-  vault: {
-    path: string
+  vault?: {
+    path?: string
+    configDir?: string
+    shape_interval?: number
   }
   search?: {
     vector_weight?: number

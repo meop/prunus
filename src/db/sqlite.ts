@@ -1,7 +1,70 @@
 import { Database } from '@db/sqlite'
+import { join } from '@std/path'
+
 import { config } from '../config.ts'
 import { log } from '../log.ts'
 import type { NoteParams, NoteRecord, SearchParams, SearchResult, Store } from './store.ts'
+
+const SQLITE_VEC_VERSION = '0.1.9'
+
+function platformSlug(): string {
+  const os = Deno.build.os === 'darwin' ? 'macos' : Deno.build.os
+  const arch = Deno.build.arch
+  return `${os}-${arch}`
+}
+
+function vecFileName(): string {
+  if (Deno.build.os === 'windows') return 'vec0.dll'
+  if (Deno.build.os === 'darwin') return 'vec0.dylib'
+  return 'vec0.so'
+}
+
+async function ensureVecExtension(dir: string): Promise<string | null> {
+  const name = vecFileName()
+  const extPath = join(dir, name)
+
+  try {
+    await Deno.stat(extPath)
+    return extPath
+  } catch { /* not cached */ }
+
+  const slug = platformSlug()
+  const archive = `sqlite-vec-${SQLITE_VEC_VERSION}-loadable-${slug}.tar.gz`
+  const url = `https://github.com/asg017/sqlite-vec/releases/download/v${SQLITE_VEC_VERSION}/${archive}`
+
+  log.info('db', `downloading sqlite-vec ${SQLITE_VEC_VERSION} (${slug})`)
+
+  const resp = await fetch(url)
+  if (!resp.ok) {
+    log.warn('db', `failed to download sqlite-vec: ${resp.status} ${resp.statusText}`)
+    return null
+  }
+
+  await Deno.mkdir(dir, { recursive: true })
+
+  const archivePath = join(dir, archive)
+  try {
+    await Deno.writeFile(archivePath, new Uint8Array(await resp.arrayBuffer()))
+    const { code } = await new Deno.Command('tar', { args: ['xzf', archivePath], cwd: dir }).output()
+    if (code !== 0) {
+      log.warn('db', 'failed to extract sqlite-vec archive')
+      return null
+    }
+    for await (const entry of Deno.readDir(dir)) {
+      if (entry.name.startsWith('vec0.')) {
+        log.info('db', `sqlite-vec cached at ${join(dir, entry.name)}`)
+        return join(dir, entry.name)
+      }
+    }
+    log.warn('db', 'vec0 extension not found in archive')
+    return null
+  } catch (err) {
+    log.warn('db', `sqlite-vec setup failed: ${String(err)}`)
+    return null
+  } finally {
+    await Deno.remove(archivePath).catch(() => {})
+  }
+}
 
 const DDL = [
   `CREATE TABLE IF NOT EXISTS notes (
@@ -44,26 +107,55 @@ function cosineDistance(a: number[], b: number[]): number {
   return mag === 0 ? 1 : 1 - dot / mag
 }
 
-// Helper: run a prepared query and return rows as typed objects
+function serializeF32(vec: number[]): Uint8Array {
+  const buf = new Uint8Array(vec.length * 4)
+  const view = new DataView(buf.buffer)
+  for (let i = 0; i < vec.length; i++) view.setFloat32(i * 4, vec[i])
+  return buf
+}
+
 // deno-lint-ignore no-explicit-any
 function q<T>(db: Database, sql: string, ...params: any[]): T[] {
   return [...db.prepare(sql).iter(...params)] as T[]
 }
 
 export class SqliteStore implements Store {
-  private db: Database
+  private db!: Database
+  private hasVec = false
+  private dir: string
 
   constructor() {
-    this.db = new Database(config.db.sqlitePath)
+    this.dir = config.db.sqliteDir
   }
 
-  init(): Promise<void> {
-    log.info('db', `running ${DDL.length} DDL statements (sqlite: ${config.db.sqlitePath})`)
+  async init(): Promise<void> {
+    await Deno.mkdir(this.dir, { recursive: true })
+    this.db = new Database(join(this.dir, 'prunus.db'))
+    log.info('db', `running ${DDL.length} DDL statements (sqlite: ${this.dir})`)
     this.db.exec('PRAGMA journal_mode=WAL')
     this.db.exec('PRAGMA foreign_keys=ON')
     for (const stmt of DDL) this.db.exec(stmt)
+
+    const vecPath = await ensureVecExtension(this.dir)
+    if (vecPath) {
+      try {
+        this.db.enableLoadExtension = true
+        this.db.loadExtension(vecPath)
+        this.db.enableLoadExtension = false
+        this.hasVec = true
+        this.db.exec(
+          `CREATE VIRTUAL TABLE IF NOT EXISTS notes_vec USING vec0(note_id TEXT PRIMARY KEY, embedding float[${config.llm.embedDimension}])`,
+        )
+        log.info('db', 'sqlite-vec extension loaded')
+      } catch (err) {
+        this.db.enableLoadExtension = false
+        log.warn('db', `failed to load sqlite-vec: ${String(err)}, falling back to JS cosine`)
+      }
+    } else {
+      log.info('db', 'sqlite-vec not available, using JS cosine similarity')
+    }
+
     log.info('db', 'sqlite ready')
-    return Promise.resolve()
   }
 
   close(): Promise<void> {
@@ -99,6 +191,17 @@ export class SqliteStore implements Store {
       p.summary ?? '',
       p.path,
     )
+
+    if (this.hasVec) {
+      this.db.prepare(`DELETE FROM notes_vec WHERE note_id = ?`).run(p.id)
+      if (p.embed) {
+        this.db.prepare(`INSERT INTO notes_vec (note_id, embedding) VALUES (?, ?)`).run(
+          p.id,
+          serializeF32(p.embed),
+        )
+      }
+    }
+
     return Promise.resolve()
   }
 
@@ -107,6 +210,7 @@ export class SqliteStore implements Store {
     const row = q<R>(this.db, `SELECT id FROM notes WHERE vault = ? AND path = ?`, vault, path)[0]
     if (row) {
       this.db.prepare(`DELETE FROM notes_fts WHERE id = ?`).run(row.id)
+      if (this.hasVec) this.db.prepare(`DELETE FROM notes_vec WHERE note_id = ?`).run(row.id)
       this.db.prepare(`DELETE FROM notes WHERE vault = ? AND path = ?`).run(vault, path)
     }
     return Promise.resolve()
@@ -140,6 +244,56 @@ export class SqliteStore implements Store {
   }
 
   searchNotes(p: SearchParams): Promise<SearchResult[]> {
+    if (this.hasVec) return this.searchNotesVec(p)
+    return this.searchNotesJs(p)
+  }
+
+  private searchNotesVec(p: SearchParams): Promise<SearchResult[]> {
+    type R = { note_id: string; distance: number }
+    const vecRows = q<R>(
+      this.db,
+      `SELECT note_id, distance FROM notes_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?`,
+      serializeF32(p.queryEmbedding),
+      p.limit * 3,
+    )
+    if (vecRows.length === 0) return Promise.resolve([])
+
+    const ids = vecRows.map((r) => r.note_id)
+    const placeholders = ids.map(() => '?').join(',')
+    type N = { id: string; path: string; summary: string | null; projects: string; vault: string }
+    const notes = q<N>(
+      this.db,
+      `SELECT id, vault, path, summary, projects FROM notes WHERE vault = ? AND id IN (${placeholders})`,
+      p.vault,
+      ...ids,
+    )
+
+    const distMap = new Map(vecRows.map((r) => [r.note_id, r.distance]))
+    type Candidate = SearchResult & { distance: number }
+    const candidates: Candidate[] = []
+    for (const n of notes) {
+      const distance = distMap.get(n.id)
+      if (distance === undefined || distance >= p.vectorGate) continue
+      candidates.push({
+        id: n.id,
+        path: n.path,
+        summary: n.summary ?? '',
+        projects: JSON.parse(n.projects),
+        score: distance * p.vectorWeight,
+        distance,
+      })
+    }
+
+    if (candidates.length === 0) return Promise.resolve([])
+
+    const ftsScores = this.getFtsScores(p.vault, p.query, candidates.map((c) => c.id))
+    for (const c of candidates) c.score += (1 - (ftsScores.get(c.id) ?? 0)) * p.ftsWeight
+
+    candidates.sort((a, b) => a.score - b.score)
+    return Promise.resolve(candidates.slice(0, p.limit))
+  }
+
+  private searchNotesJs(p: SearchParams): Promise<SearchResult[]> {
     type R = {
       id: string
       path: string
@@ -224,6 +378,26 @@ export class SqliteStore implements Store {
   }
 
   checkDuplicate(vault: string, embed: number[], threshold: number): Promise<boolean> {
+    if (this.hasVec) return this.checkDuplicateVec(vault, embed, threshold)
+    return this.checkDuplicateJs(vault, embed, threshold)
+  }
+
+  private checkDuplicateVec(vault: string, embed: number[], threshold: number): Promise<boolean> {
+    const distance = 1 - threshold
+    type R = { note_id: string }
+    const match = q<R>(
+      this.db,
+      `SELECT n.id as note_id FROM notes_vec v JOIN notes n ON v.note_id = n.id
+       WHERE v.embedding MATCH ? AND n.vault = ? AND v.distance < ?
+       LIMIT 1`,
+      serializeF32(embed),
+      vault,
+      distance,
+    )
+    return Promise.resolve(match.length > 0)
+  }
+
+  private checkDuplicateJs(vault: string, embed: number[], threshold: number): Promise<boolean> {
     type R = { embed: string }
     const rows = q<R>(this.db, `SELECT embed FROM notes WHERE vault = ? AND embed IS NOT NULL`, vault)
     for (const { embed: embJson } of rows) {
@@ -256,6 +430,24 @@ export class SqliteStore implements Store {
       )
     }
     return Promise.resolve()
+  }
+
+  getNoteEmbed(vault: string, path: string): Promise<number[] | null> {
+    type R = { embed: string | null }
+    const row = q<R>(this.db, `SELECT embed FROM notes WHERE vault = ? AND path = ?`, vault, path)[0]
+    if (!row?.embed) return Promise.resolve(null)
+    return Promise.resolve(JSON.parse(row.embed) as number[])
+  }
+
+  getSourcesLinkingTo(targetId: string): Promise<Array<{ id: string; vault: string; path: string }>> {
+    type R = { id: string; vault: string; path: string }
+    return Promise.resolve(
+      q<R>(
+        this.db,
+        `SELECT n.id, n.vault, n.path FROM links l JOIN notes n ON l.source_id = n.id WHERE l.target_id = ?`,
+        targetId,
+      ),
+    )
   }
 
   private getFtsScores(vault: string, query: string, ids: string[]): Map<string, number> {

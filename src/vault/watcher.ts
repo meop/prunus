@@ -54,7 +54,11 @@ export async function startVaultWatcher(): Promise<void> {
       if (slash === -1) continue
       const vault = rel.slice(0, slash)
       const filePath = rel.slice(slash + 1)
-      enqueue({ type: event.kind === 'remove' ? 'delete' : 'reindex', vault, path: filePath })
+      if (event.kind === 'remove') {
+        enqueue({ type: 'delete', vault, path: filePath })
+      } else {
+        enqueue({ type: 'reindex', vault, path: filePath })
+      }
     }
   }
 }

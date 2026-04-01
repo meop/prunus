@@ -2,18 +2,18 @@
 
 ## Feature Matrix
 
-| Feature                       | Claude Code                  | Gemini CLI                  | Qwen-Code                   | OpenCode                                                                         |
-| ----------------------------- | ---------------------------- | --------------------------- | --------------------------- | -------------------------------------------------------------------------------- |
-| **First-turn context inject** | ✅ `UserPromptSubmit`        | ✅ `BeforeAgent`            | ✅ `UserPromptSubmit`       | ✅² `experimental.chat.system.transform`                                         |
-| **Session-end ingest**        | ✅ `Stop`¹                   | ✅ `SessionEnd`             | ✅ `SessionEnd`             | ✅ `event: session.idle`¹                                                        |
-| **Pre-compact ingest**        | ✅ `PreCompact`              | ✅ `PreCompress`            | ✅ `PreCompact`             | ✅³ `experimental.session.compacting` (context inject) + `session.idle` (ingest) |
-| **MCP server**                | ✅ `type:"http"`             | ✅ `httpUrl`                | ✅ `httpUrl`                | ✅ `type:"remote"`                                                               |
-| **Install target**            | `~/.claude/settings.json`    | `~/.gemini/settings.json`   | `~/.qwen/settings.json`     | `~/.config/opencode/opencode.json`                                               |
-| **Plugin type**               | Deno TS hooks                | Deno TS hooks               | Deno TS hooks               | TypeScript plugin                                                                |
-| **Windows**                   | ✅⁴ Bun cross-platform shell | ⚠️ hooks run via PowerShell | ⚠️ hooks run via PowerShell | ✅ TypeScript, cross-platform                                                    |
-| **Hook isolation**            | subprocess                   | subprocess                  | subprocess                  | in-process                                                                       |
-| **Env sanitization**          | —                            | ✅ `sanitizeEnvironment()`  | —                           | n/a                                                                              |
-| **Project hook trust**        | —                            | ✅ `trusted_hooks.json`     | —                           | n/a                                                                              |
+| Feature                       | Claude Code                  | Gemini CLI                  | OpenCode                                                                         | Qwen-Code                   |
+| ----------------------------- | ---------------------------- | --------------------------- | -------------------------------------------------------------------------------- | --------------------------- |
+| **Per-prompt context inject** | ✅ `UserPromptSubmit`        | ✅ `BeforeAgent`            | ✅² `experimental.chat.system.transform`                                         | ✅ `UserPromptSubmit`       |
+| **Session-end ingest**        | ✅ `Stop`¹                   | ✅ `SessionEnd`             | ✅ `event: session.idle`¹                                                        | ✅ `SessionEnd`             |
+| **Pre-compact ingest**        | ✅ `PreCompact`              | ✅ `PreCompress`            | ✅³ `experimental.session.compacting` (context inject) + `session.idle` (ingest) | ✅ `PreCompact`             |
+| **MCP server**                | ✅ `type:"http"`             | ✅ `httpUrl`                | ✅ `type:"remote"`                                                               | ✅ `httpUrl`                |
+| **Install target**            | `~/.claude/settings.json`    | `~/.gemini/settings.json`   | `~/.config/opencode/opencode.json`                                               | `~/.qwen/settings.json`     |
+| **Plugin type**               | Deno TS hooks                | Deno TS hooks               | TypeScript plugin                                                                | Deno TS hooks               |
+| **Windows**                   | ✅⁴ Bun cross-platform shell | ⚠️ hooks run via PowerShell | ✅ TypeScript, cross-platform                                                    | ⚠️ hooks run via PowerShell |
+| **Hook isolation**            | subprocess                   | subprocess                  | in-process                                                                       | subprocess                  |
+| **Env sanitization**          | —                            | ✅ `sanitizeEnvironment()`  | n/a                                                                              | —                           |
+| **Project hook trust**        | —                            | ✅ `trusted_hooks.json`     | n/a                                                                              | —                           |
 
 ¹ Both Claude Code's `Stop` and OpenCode's `session.idle` fire after every response turn (no `SessionEnd`-equivalent
 exposed). The per-session marker file (`~/.prunus/markers/{session_id}.last-ingested`) prevents reprocessing — each
@@ -22,7 +22,8 @@ internal SDK rather than parsing a transcript file.
 
 ² OpenCode has no `UserPromptSubmit` / `BeforeAgent` equivalent. Instead, `experimental.chat.system.transform` is used —
 it fires on every LLM call and appends the profile to the system prompt. The profile is always present in context rather
-than first-turn only. Profile is fetched once per plugin instance and cached.
+than first-turn only. Relevant notes are fetched per prompt via the context endpoint, injected into every LLM call's
+system prompt.
 
 ³ OpenCode has no dedicated pre-compact ingest hook (the `experimental.session.compacting` output only accepts context
 strings, not messages). Pre-compact ingest is not needed as a separate step because `session.idle` already ingests
@@ -110,7 +111,8 @@ All hooks receive the same base input via stdin:
   "transcript_path": "/path/to/session.jsonl",
   "cwd": "/path/to/project",
   "hook_event_name": "UserPromptSubmit",
-  "timestamp": "2026-01-01T00:00:00Z"
+  "timestamp": "2026-01-01T00:00:00Z",
+  "prompt": "the user's prompt text"
 }
 ```
 
@@ -191,14 +193,10 @@ output.context.push('plain text or markdown')
 All installers are Deno TypeScript (cross-platform: Windows, macOS, Linux):
 
 ```
-client/
-  claude-code/install.ts   deno run --allow-all client/claude-code/install.ts
-  gemini-cli/install.ts    deno run --allow-all client/gemini-cli/install.ts
-  qwen-code/install.ts     deno run --allow-all client/qwen-code/install.ts
-  opencode/install.ts      deno run --allow-all client/opencode/install.ts
+cli/install.ts          deno run --allow-all http://prunus-host:9100/cli/install
 ```
 
-For Claude Code, Gemini CLI, and Qwen-Code: prompts for `PRUNUS_URL` and `PRUNUS_AUTH_TOKEN`, writes `~/.prunus/.env`,
+For Claude Code, Gemini CLI, and Qwen-Code: prompts for server URL and auth token, writes `~/.prunus/settings.json`,
 copies hooks and the shared module to `~/.prunus/hooks/`, runs `deno cache` to pre-fetch JSR imports, and registers
 hooks + MCP in the tool's settings file. Hook commands registered in settings are
 `deno run --allow-all --no-check <hook.ts>`.
@@ -209,14 +207,17 @@ registers the MCP server in `~/.config/opencode/opencode.json` under the `mcp` k
 
 ## Shared Config
 
-Hook config lives in `~/.prunus/.env` (written by the installer, loaded by `loadEnv()` in `shared/mod.ts`):
+Hook config lives in `~/.prunus/settings.json` (written by the installer). Per-project vault override: add
+`.prunus/settings.json` in the project root with `{ "vault": "myvault" }`. Hooks are a no-op if `vault` is unset.
 
+```json
+{
+  "serverUrl": "http://localhost:9100",
+  "authToken": "",
+  "vault": "code",
+  "enabled": true,
+  "markerTtlDays": 30
+}
 ```
-PRUNUS_URL=http://localhost:9100
-PRUNUS_AUTH_TOKEN=
-```
-
-Per-project vault selection: add `PRUNUS_VAULT=myvault` to the project's `.env` file. Hooks are a no-op if
-`PRUNUS_VAULT` is unset.
 
 Marker files for pre-compact/session-end delta tracking: `~/.prunus/markers/{session_id}.last-ingested`

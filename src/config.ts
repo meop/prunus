@@ -1,11 +1,14 @@
+import { join, resolve } from '@std/path'
 import { settings } from './settings.ts'
 
-if (!settings.vault?.path) throw new Error('Missing required setting: vault.path')
+const vaultPath = settings.vault?.path ?? './.vault'
+const configDir = settings.vault?.configDir || join(resolve(vaultPath), '..', 'prunus-config')
+const secretDir = join(resolve(configDir), '..', 'prunus-config-secret')
 
 export const config = {
   db: {
     type: (settings.db?.type ?? 'sqlite') as 'postgres' | 'sqlite',
-    sqlitePath: settings.db?.sqlite?.path ?? './prunus.db',
+    sqliteDir: settings.db?.sqlite?.path ?? './.db',
     hostname: settings.db?.postgres?.hostname ?? '',
     port: settings.db?.postgres?.port ?? 5432,
     database: settings.db?.postgres?.database ?? '',
@@ -19,7 +22,10 @@ export const config = {
     embedModel: settings.llm?.embed?.model ?? '',
   },
   vault: {
-    base: settings.vault.path,
+    base: vaultPath,
+    profilesDir: join(configDir, 'cfg', 'profiles'),
+    secretProfilesDir: join(secretDir, 'cfg', 'profiles'),
+    shapeInterval: settings.vault?.shape_interval ?? 20,
   },
   server: {
     hostname: settings.srv?.hostname ?? '0.0.0.0',

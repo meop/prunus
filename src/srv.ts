@@ -1,21 +1,28 @@
-import { join } from '@std/path'
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js'
+import { join } from '@std/path'
 
 import { checkAuth } from './auth.ts'
 import { config } from './config.ts'
-import { initStore } from './db/index.ts'
+import { getStore, initStore } from './db/index.ts'
+import { getHealth } from './health.ts'
 import { ingest } from './ingest/index.ts'
 import { log } from './log.ts'
+import { embed } from './llm/embed.ts'
 import { createMcpServer } from './mcp/server.ts'
 import { RequestTransport } from './mcp/transport.ts'
-import { queueDepth, requeueNullEmbeddings } from './queue.ts'
-import { loadProfile } from './vault/profiles.ts'
+import { initQueue, requeueNullEmbeddings } from './queue.ts'
 import { startVaultWatcher } from './vault/watcher.ts'
 
-const CLIENT_DIR = join(import.meta.dirname ?? '', '..', 'client')
+const ROUTE_CLI = '/cli'
+const ROUTE_HEALTH = '/health'
+const ROUTE_MCP = '/mcp'
+const ROUTE_VAULT = '/vault'
+
+const SUBPATH_CLI = join(import.meta.dirname ?? '', 'cli')
 
 async function startup(): Promise<void> {
   await initStore()
+  await initQueue()
   await requeueNullEmbeddings()
   await startVaultWatcher()
   log.info('prunus', 'ready')
@@ -27,15 +34,20 @@ Deno.serve(
     const url = new URL(req.url)
     const { pathname } = url
 
-    // ── Client install files (public — no auth) ──────────────────────────────
-    if (pathname === '/install' && req.method === 'GET') {
-      return Response.redirect(`${url.origin}/client/install.ts`, 302)
+    // ── Probe ───────────────────────────────────────────────────────────────
+    if (pathname === '/' && req.method === 'GET') {
+      return new Response('prunus', { status: 200 })
     }
 
-    if (pathname.startsWith('/client/') && req.method === 'GET') {
-      const subpath = pathname.slice('/client/'.length)
+    // ── Client install files (public — no auth) ──────────────────────────────
+    if (pathname === `${ROUTE_CLI}/install` && req.method === 'GET') {
+      return Response.redirect(`${url.origin}${ROUTE_CLI}/install.ts`, 302)
+    }
+
+    if (pathname.startsWith(`${ROUTE_CLI}/`) && req.method === 'GET') {
+      const subpath = pathname.slice(`${ROUTE_CLI}/`.length)
       if (!subpath || subpath.includes('..')) return new Response('Not Found', { status: 404 })
-      const filePath = join(CLIENT_DIR, subpath)
+      const filePath = join(SUBPATH_CLI, subpath)
       try {
         const content = await Deno.readTextFile(filePath)
         const ct = filePath.endsWith('.json') ? 'application/json' : 'text/plain; charset=utf-8'
@@ -46,42 +58,57 @@ Deno.serve(
       }
     }
 
-    const authError = checkAuth(req)
-    if (authError) return authError
-
-    // ── Health ──────────────────────────────────────────────────────────────
-    if (pathname === '/' && req.method === 'GET') {
-      return new Response('prunus', { status: 200 })
-    }
-
-    if (pathname === '/health' && req.method === 'GET') {
+    // ── Health (public — no auth, no sensitive data) ────────────────────────
+    if (pathname === ROUTE_HEALTH && req.method === 'GET') {
       return Response.json(await getHealth())
     }
 
-    // ── Context (first-turn injection for client hook) ───────────────────────
-    const ctxMatch = pathname.match(/^\/vaults\/([^/]+)\/context$/)
+    const authError = checkAuth(req)
+    if (authError) return authError
+
+    // ── Vault routes ────────────────────────────────────────────────────────
+    const ctxMatch = pathname.match(new RegExp(`^${ROUTE_VAULT}/([^/]+)/context$`))
     if (ctxMatch && req.method === 'GET') {
       const vault = ctxMatch[1]
-      const profile = await loadProfile(vault, url.searchParams.get('profile') ?? '')
-      return Response.json({ profile })
+      const query = url.searchParams.get('query')?.trim()
+      if (!query) return Response.json({ notes: [] })
+
+      const store = getStore()
+      let results: Array<{ path: string; summary: string }> = []
+
+      if (config.llm.embedModel) {
+        try {
+          const queryEmbedding = await embed(query)
+          results = await store.searchNotes({
+            vault,
+            queryEmbedding,
+            query,
+            limit: 5,
+            vectorWeight: config.search.vectorWeight,
+            ftsWeight: config.search.ftsWeight,
+            vectorGate: config.search.vectorGate,
+          })
+        } catch {
+          results = await store.searchNotesFts(vault, query, 5)
+        }
+      } else {
+        results = await store.searchNotesFts(vault, query, 5)
+      }
+
+      const notes = results.map((r) => ({ path: r.path, summary: r.summary }))
+      return Response.json({ notes })
     }
 
-    // ── Ingest ───────────────────────────────────────────────────────────────
-    const ingestMatch = pathname.match(/^\/vaults\/([^/]+)\/ingest$/)
+    const ingestMatch = pathname.match(new RegExp(`^${ROUTE_VAULT}/([^/]+)/ingest$`))
     if (ingestMatch && req.method === 'POST') {
       const vault = ingestMatch[1]
-      try {
-        const body = await req.json()
-        const result = await ingest(vault, body)
-        return Response.json(result)
-      } catch (err) {
-        log.error('ingest', 'request failed', String(err))
-        return Response.json({ error: String(err) }, { status: 500 })
-      }
+      const body = await req.json()
+      ingest(vault, body).catch((err) => log.error('ingest', 'background ingest failed', String(err)))
+      return new Response(null, { status: 202 })
     }
 
     // ── MCP ──────────────────────────────────────────────────────────────────
-    if (pathname === '/mcp' && req.method === 'POST') {
+    if (pathname === ROUTE_MCP && req.method === 'POST') {
       const body = (await req.json()) as JSONRPCMessage
       const method = 'method' in body ? String(body.method) : 'unknown'
       log.info('mcp', `→ ${method}`)
@@ -108,25 +135,3 @@ startup().catch((err) => {
   log.error('prunus', 'startup error', String(err))
   Deno.exit(1)
 })
-
-async function getHealth() {
-  const { getStore } = await import('./db/index.ts')
-  let dbStatus = 'disconnected'
-  try {
-    await getStore().getNotesNeedingReindex('__health_probe__')
-    dbStatus = 'connected'
-  } catch (_e) { /* not ready */ }
-
-  let embedService = 'unavailable'
-  try {
-    const resp = await fetch(`${config.llm.baseUrl}/`, { signal: AbortSignal.timeout(2000) })
-    if (resp.ok || resp.status < 500) embedService = 'available'
-  } catch (_e) { /* unreachable */ }
-
-  return {
-    status: dbStatus === 'connected' ? 'ok' : 'degraded',
-    db: `${config.db.type}:${dbStatus}`,
-    embed_service: embedService,
-    queue_depth: queueDepth(),
-  }
-}

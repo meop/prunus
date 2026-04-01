@@ -12,7 +12,7 @@ level = 'info'
 type = 'sqlite'
 
 [db.sqlite]
-path = '/vol/note/prunus/prunus.db'
+path = '/vol/note/prunus'
 
 # [db.postgres]
 # hostname = 'arch.lan'
@@ -26,10 +26,11 @@ hostname = 'arch.lan'
 port = 1234
 
 [llm.chat]
-model = 'qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf'
+model = 'qwen3.5-4b'
 
 [llm.embed]
-model = 'text-embedding-bge-m3/bge-m3-q8_0.gguf'
+model = 'text-embedding-bge-m3'
+# must match model
 dimension = 1024
 
 [vault]

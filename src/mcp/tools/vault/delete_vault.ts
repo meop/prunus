@@ -1,5 +1,5 @@
-import { join } from '@std/path'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { join } from '@std/path'
 import { z } from 'zod'
 
 import { config } from '../../../config.ts'

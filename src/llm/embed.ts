@@ -6,7 +6,10 @@ export async function embed(text: string): Promise<number[]> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: config.llm.embedModel, input: text }),
   })
-  if (!response.ok) throw new Error(`Embed request failed: ${response.status} ${response.statusText}`)
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`Embed request failed: ${response.status} ${response.statusText}${body ? ` — ${body}` : ''}`)
+  }
   const data = (await response.json()) as { data: Array<{ embedding: number[] }> }
   const embedding = data.data[0]?.embedding
   if (!embedding) throw new Error('No embedding returned from embed service')

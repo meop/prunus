@@ -25,6 +25,7 @@ export interface HookInput {
   cwd?: string
   hook_event_name?: string
   timestamp?: string
+  prompt?: string
 }
 
 export interface PrunusSettings {
@@ -33,7 +34,6 @@ export interface PrunusSettings {
   vault?: string
   enabled?: boolean
   project?: string
-  profile?: string
   markerTtlDays?: number
 }
 
@@ -43,13 +43,16 @@ export interface PrunusConfig {
   vault: string
   enabled: boolean
   project: string
-  profile: string
   markerTtlDays: number
 }
 
 export interface IngestResult {
-  saved?: Array<{ path: string; summary: string }>
-  skipped?: number
+  chunks: number
+}
+
+export interface ContextNote {
+  path: string
+  summary: string
 }
 
 // ---------------------------------------------------------------------------
@@ -73,16 +76,16 @@ async function readSettingsFile(dir: string): Promise<PrunusSettings> {
   }
 }
 
-async function findProjectSettings(cwd: string): Promise<PrunusSettings> {
+async function findProjectSettings(cwd: string): Promise<{ settings: PrunusSettings; dir: string | null }> {
   let dir = cwd
   while (true) {
     const s = await readSettingsFile(dir)
-    if (Object.keys(s).length > 0) return s
+    if (Object.keys(s).length > 0) return { settings: s, dir }
     const parent = dirname(dir)
     if (parent === dir) break
     dir = parent
   }
-  return {}
+  return { settings: {}, dir: null }
 }
 
 /**
@@ -93,15 +96,15 @@ async function findProjectSettings(cwd: string): Promise<PrunusSettings> {
  */
 export async function loadSettings(cwd: string): Promise<PrunusConfig> {
   const userSettings = await readSettingsFile(homeDir())
-  const projectSettings = await findProjectSettings(cwd)
+  const { settings: projectSettings, dir: projectDir } = await findProjectSettings(cwd)
+  const projectDirName = projectDir?.split(/[\\/]/).filter(Boolean).pop() ?? ''
 
   return {
     serverUrl: userSettings.serverUrl ?? 'http://localhost:9100',
     authToken: userSettings.authToken ?? '',
     vault: projectSettings.vault ?? userSettings.vault ?? '',
     enabled: projectSettings.enabled ?? userSettings.enabled ?? true,
-    project: projectSettings.project ?? cwd.split(/[\\/]/).filter(Boolean).pop() ?? '',
-    profile: projectSettings.profile ?? userSettings.profile ?? '',
+    project: projectSettings.project ?? projectDirName,
     markerTtlDays: userSettings.markerTtlDays ?? 30,
   }
 }
@@ -227,28 +230,6 @@ export async function parseTranscript(
   return [turns, lastTs]
 }
 
-/** Count non-meta user/assistant turns in a transcript (for first-turn detection). */
-export async function countTranscriptTurns(transcriptPath: string): Promise<number> {
-  let text: string
-  try {
-    text = await Deno.readTextFile(transcriptPath)
-  } catch {
-    return 0
-  }
-  let count = 0
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    try {
-      const e = JSON.parse(trimmed) as Record<string, unknown>
-      if (!e.isMeta && (e.type === 'user' || e.type === 'assistant')) count++
-    } catch {
-      continue
-    }
-  }
-  return count
-}
-
 // ---------------------------------------------------------------------------
 // Prunus API calls
 // ---------------------------------------------------------------------------
@@ -257,26 +238,23 @@ function authHeaders(config: PrunusConfig): Record<string, string> {
   return config.authToken ? { 'Authorization': `Bearer ${config.authToken}` } : {}
 }
 
-/** GET /vaults/{vault}/context — returns the vault profile string or null. Returns null if no profile configured. */
-export async function fetchProfile(config: PrunusConfig): Promise<string | null> {
-  if (!config.profile) return null
+/** GET /vault/{vault}/context?query=… — returns relevant vault notes or empty array. */
+export async function fetchContext(config: PrunusConfig, query: string): Promise<ContextNote[]> {
   try {
-    const url = `${config.serverUrl}/vaults/${config.vault}/context?project=${
-      encodeURIComponent(config.project)
-    }&profile=${encodeURIComponent(config.profile)}`
+    const url = `${config.serverUrl}/vault/${config.vault}/context?query=${encodeURIComponent(query)}`
     const resp = await fetch(url, {
       headers: authHeaders(config),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(8000),
     })
-    if (!resp.ok) return null
-    const data = await resp.json() as { profile?: string }
-    return data.profile?.trim() || null
+    if (!resp.ok) return []
+    const data = await resp.json() as { notes?: ContextNote[] }
+    return data.notes ?? []
   } catch {
-    return null
+    return []
   }
 }
 
-/** POST /vaults/{vault}/ingest — returns result or null on failure. */
+/** POST /vault/{vault}/ingest — returns result or null on failure. */
 export async function ingestTranscript(
   turns: Turn[],
   since: string,
@@ -284,9 +262,8 @@ export async function ingestTranscript(
 ): Promise<IngestResult | null> {
   const body: Record<string, unknown> = { project: config.project, transcript: turns }
   if (since) body.since = since
-  if (config.profile) body.profile = config.profile
   try {
-    const resp = await fetch(`${config.serverUrl}/vaults/${config.vault}/ingest`, {
+    const resp = await fetch(`${config.serverUrl}/vault/${config.vault}/ingest`, {
       method: 'POST',
       headers: { ...authHeaders(config), 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -316,7 +293,7 @@ export async function runIngestHook(label: string): Promise<void> {
 }
 
 /**
- * First-turn context injection entry point.
+ * Per-prompt context injection entry point.
  * tagStyle: 'xml' for Claude Code (no escaping), 'bracket' for Gemini/Qwen (HTML-escapes < >).
  * output: wraps the context string in the tool-specific JSON envelope.
  */
@@ -328,16 +305,15 @@ export async function runContextHook(
   const input = parseHookInput(raw)
   const config = await loadSettings(input.cwd ?? Deno.cwd())
   if (!config.vault || !config.enabled) Deno.exit(0)
-  const transcriptPath = input.transcript_path ?? ''
-  const turnCount = transcriptPath ? await countTranscriptTurns(transcriptPath) : 0
-  if (turnCount > 2) Deno.exit(0)
-  const profile = await fetchProfile(config)
-  if (!profile) Deno.exit(0)
+  const query = input.prompt?.trim()
+  if (!query) Deno.exit(0)
+  const notes = await fetchContext(config, query)
+  if (notes.length === 0) Deno.exit(0)
   const [open, close] = tagStyle === 'xml'
     ? [`<prunus vault="${config.vault}" project="${config.project}">`, '</prunus>']
     : [`[prunus vault="${config.vault}" project="${config.project}"]`, '[/prunus]']
-  const ctx =
-    `${open}\n${profile}\nUse search_notes and read_note MCP tools to retrieve specific vault knowledge when relevant.\n${close}`
+  const notesList = notes.map((n) => `- ${n.path}: ${n.summary}`).join('\n')
+  const ctx = `${open}\nRelevant vault notes — use read_note MCP tool to retrieve full content:\n${notesList}\n${close}`
   console.log(JSON.stringify(output(ctx)))
 }
 
@@ -372,21 +348,10 @@ export async function runIngest(
 
   if (lastTs && sessionId) await writeMarker(sessionId, lastTs)
 
-  if (result.saved?.length) {
-    const enc = new TextEncoder()
-    Deno.stderr.write(
-      enc.encode(`${logPrefix} saved ${result.saved.length} note(s) to ${config.vault}:\n`),
-    )
-    for (const s of result.saved) {
-      Deno.stderr.write(enc.encode(`  - ${s.path}: ${s.summary.slice(0, 80)}\n`))
-    }
-  }
-  if (result.skipped) {
-    Deno.stderr.write(
-      new TextEncoder().encode(`${logPrefix} skipped ${result.skipped} duplicate(s)\n`),
-    )
-  }
-  if (!result.saved?.length && !result.skipped) {
-    Deno.stderr.write(new TextEncoder().encode(`${logPrefix} no notes extracted\n`))
+  const enc = new TextEncoder()
+  if (result.chunks > 0) {
+    Deno.stderr.write(enc.encode(`${logPrefix} enqueued ${result.chunks} chunk(s) for vault ${config.vault}\n`))
+  } else {
+    Deno.stderr.write(enc.encode(`${logPrefix} no knowledge chunks extracted\n`))
   }
 }

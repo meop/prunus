@@ -43,16 +43,16 @@ async function readSettingsFile(dir: string): Promise<PrunusSettings> {
   }
 }
 
-async function findProjectSettings(cwd: string): Promise<PrunusSettings> {
+async function findProjectSettings(cwd: string): Promise<{ settings: PrunusSettings; dir: string | null }> {
   let dir = cwd
   while (true) {
     const s = await readSettingsFile(dir)
-    if (Object.keys(s).length > 0) return s
+    if (Object.keys(s).length > 0) return { settings: s, dir }
     const parent = dirname(dir)
     if (parent === dir) break
     dir = parent
   }
-  return {}
+  return { settings: {}, dir: null }
 }
 
 export const prunus = ({ directory, client }: { directory: string; client: any }) => {
@@ -74,13 +74,14 @@ export const prunus = ({ directory, client }: { directory: string; client: any }
     if (!settingsPromise) {
       settingsPromise = (async () => {
         const userSettings = await readSettingsFile(HOME)
-        const projectSettings = await findProjectSettings(directory)
+        const { settings: projectSettings, dir: projectDir } = await findProjectSettings(directory)
+        const projectDirName = projectDir?.split('/').filter(Boolean).pop() ?? ''
         return {
           serverUrl: userSettings.serverUrl ?? 'http://localhost:9100',
           authToken: userSettings.authToken ?? '',
           vault: projectSettings.vault ?? userSettings.vault ?? '',
           enabled: projectSettings.enabled ?? userSettings.enabled ?? true,
-          project: projectSettings.project ?? directory.split('/').filter(Boolean).pop() ?? '',
+          project: projectSettings.project ?? projectDirName,
         }
       })()
     }
@@ -92,10 +93,10 @@ export const prunus = ({ directory, client }: { directory: string; client: any }
   }
 
   async function fetchProfile(): Promise<string | null> {
-    const { serverUrl, authToken, vault, enabled, project } = await getSettings()
+    const { serverUrl, authToken, vault, enabled } = await getSettings()
     if (!vault || !enabled) return null
     try {
-      const url = `${serverUrl}/vaults/${vault}/context?project=${encodeURIComponent(project)}`
+      const url = `${serverUrl}/vault/${vault}/context`
       const resp = await fetch(url, {
         headers: authHeaders(authToken),
         signal: AbortSignal.timeout(5000),
@@ -166,7 +167,7 @@ export const prunus = ({ directory, client }: { directory: string; client: any }
     const body: Record<string, unknown> = { project, transcript: turns }
     if (since) body['since'] = since
 
-    const resp = await fetch(`${serverUrl}/vaults/${vault}/ingest`, {
+    const resp = await fetch(`${serverUrl}/vault/${vault}/ingest`, {
       method: 'POST',
       headers: { ...authHeaders(authToken), 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
