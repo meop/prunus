@@ -14,7 +14,7 @@ export function checkAuth(req: Request): Response | null {
   return null
 }
 
-function timingSafeEqual(a: string, b: string): boolean {
+export function timingSafeEqual(a: string, b: string): boolean {
   const enc = new TextEncoder()
   // Pad both to 256 chars so length doesn't leak
   const aBytes = enc.encode(a.padEnd(256).slice(0, 256))

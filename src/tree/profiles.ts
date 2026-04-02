@@ -9,7 +9,7 @@ interface ProfileSections {
   skip: string[]
 }
 
-function parseSections(content: string): ProfileSections {
+export function parseSections(content: string): ProfileSections {
   const sections: ProfileSections = { capture: [], skip: [] }
   let current: 'capture' | 'skip' | null = null
 
@@ -34,7 +34,7 @@ function parseSections(content: string): ProfileSections {
   return sections
 }
 
-function combineSections(profiles: ProfileSections[]): string {
+export function combineSections(profiles: ProfileSections[]): string {
   const capture = profiles.flatMap((p) => p.capture)
   const skip = profiles.flatMap((p) => p.skip)
 

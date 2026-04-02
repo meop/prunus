@@ -46,6 +46,7 @@ Run in this order:
 1. `deno task format` — apply formatting; always modifies files if needed
 2. `deno task lint` — check for lint errors; if found, fix and return to step 1
 3. `deno task check` — type check
+4. `deno task test` — run tests
 
 ## Code Formatting
 

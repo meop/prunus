@@ -90,13 +90,13 @@ const DDL = [
   )`,
 ]
 
-function toFts5Query(query: string): string {
+export function toFts5Query(query: string): string {
   const words = query.trim().split(/\s+/).filter((w) => w.length > 1)
   if (words.length === 0) return ''
   return words.map((w) => `"${w.replace(/"/g, '""')}"`).join(' ')
 }
 
-function cosineDistance(a: number[], b: number[]): number {
+export function cosineDistance(a: number[], b: number[]): number {
   let dot = 0, magA = 0, magB = 0
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i]
