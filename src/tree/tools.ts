@@ -1,18 +1,19 @@
 import { join } from '@std/path'
-import { config } from '../config.ts'
+
+import { SETTINGS } from '../stng.ts'
 import { getStore } from '../db/index.ts'
-import { embed } from '../llm/embed.ts'
 import type { Tool } from '../llm/agent.ts'
+import { embed } from '../llm/embed.ts'
 import { emptyFrontmatter, parseFrontmatter } from './parser.ts'
 import { readNote } from './reader.ts'
 import { writeNote } from './writer.ts'
 
-// Returns the set of paths modified during the agent run, for callers to reindex.
-export function vaultTools(vault: string, modified: Set<string>, deleted: Set<string>): Tool[] {
+// Returns the set of paths modified during the agent run, for callers to survey.
+export function treeTools(tree: string, modified: Set<string>, deleted: Set<string>): Tool[] {
   return [
     {
       name: 'search_notes',
-      description: 'Search vault notes by semantic similarity. Returns path, summary, and score.',
+      description: 'Search tree notes by semantic similarity. Returns path, summary, and score.',
       parameters: {
         type: 'object',
         properties: {
@@ -28,13 +29,13 @@ export function vaultTools(vault: string, modified: Set<string>, deleted: Set<st
         try {
           const queryEmbed = await embed(query)
           const results = await store.searchNotes({
-            vault,
+            tree,
             queryEmbedding: queryEmbed,
             query,
             limit,
-            vectorWeight: config.search.vectorWeight,
-            ftsWeight: config.search.ftsWeight,
-            vectorGate: config.search.vectorGate,
+            vectorWeight: SETTINGS.search.vector.weight,
+            ftsWeight: SETTINGS.search.fts.weight,
+            vectorGate: SETTINGS.search.vector.gate,
           })
           if (results.length === 0) return 'No results.'
           return results.map((r) => `${r.path} (score ${r.score.toFixed(3)}): ${r.summary}`).join('\n')
@@ -45,18 +46,18 @@ export function vaultTools(vault: string, modified: Set<string>, deleted: Set<st
     },
     {
       name: 'read_note',
-      description: 'Read the full markdown content of a note by its vault-relative path.',
+      description: 'Read the full markdown content of a note by its tree-relative path.',
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Vault-relative path (e.g. mcp/transport.md)' },
+          path: { type: 'string', description: 'Tree-relative path (e.g. mcp/transport.md)' },
         },
         required: ['path'],
       },
       async run(args) {
         const path = String(args.path ?? '')
         try {
-          const { body } = await readNote(vault, path)
+          const { body } = await readNote(tree, path)
           return body
         } catch {
           return `Note not found: ${path}`
@@ -69,7 +70,7 @@ export function vaultTools(vault: string, modified: Set<string>, deleted: Set<st
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Vault-relative path (e.g. mcp/transport.md)' },
+          path: { type: 'string', description: 'Tree-relative path (e.g. mcp/transport.md)' },
           summary: { type: 'string', description: '2-3 sentence summary for search indexing' },
           content: { type: 'string', description: 'Full markdown body (no frontmatter)' },
           tags: { type: 'array', items: { type: 'string' }, description: 'Topic tags' },
@@ -84,32 +85,32 @@ export function vaultTools(vault: string, modified: Set<string>, deleted: Set<st
 
         let fm = emptyFrontmatter()
         try {
-          const raw = await Deno.readTextFile(join(config.vault.base, vault, path))
+          const raw = await Deno.readTextFile(join(SETTINGS.grove.path, tree, path))
           const parsed = parseFrontmatter(raw)
           fm = { ...parsed.frontmatter, summary, updated: new Date().toISOString(), tags }
         } catch {
           fm = { ...fm, summary, tags }
         }
 
-        await writeNote(vault, path, fm, content)
+        await writeNote(tree, path, fm, content)
         modified.add(path)
         return `Written: ${path}`
       },
     },
     {
       name: 'delete_note',
-      description: 'Delete a note from the vault.',
+      description: 'Delete a note from the tree.',
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Vault-relative path to delete' },
+          path: { type: 'string', description: 'Tree-relative path to delete' },
         },
         required: ['path'],
       },
       async run(args) {
         const path = String(args.path ?? '')
         try {
-          await Deno.remove(join(config.vault.base, vault, path))
+          await Deno.remove(join(SETTINGS.grove.path, tree, path))
           deleted.add(path)
           modified.delete(path)
           return `Deleted: ${path}`

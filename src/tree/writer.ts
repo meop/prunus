@@ -1,15 +1,16 @@
 import { ensureDir } from '@std/fs'
 import { dirname, join } from '@std/path'
-import { config } from '../config.ts'
+
+import { SETTINGS } from '../stng.ts'
 import { buildNoteContent, type Frontmatter } from './parser.ts'
 
-// Per-(vault,path) async mutex: chained Promise so only one write runs at a time.
+// Per-(tree,path) async mutex: chained Promise so only one write runs at a time.
 // Map entry is cleaned up once no further writes are queued.
 const mutexes = new Map<string, Promise<void>>()
 
-export async function writeNote(vault: string, path: string, fm: Frontmatter, body: string): Promise<void> {
-  const key = `${vault}:${path}`
-  const abs = join(config.vault.base, vault, path)
+export async function writeNote(tree: string, path: string, fm: Frontmatter, body: string): Promise<void> {
+  const key = `${tree}:${path}`
+  const abs = join(SETTINGS.grove.path, tree, path)
 
   const prev = mutexes.get(key) ?? Promise.resolve()
   let unlock!: () => void

@@ -1,6 +1,6 @@
 import { assertEquals } from '@std/assert'
 
-import { addSeeAlsoLink, getSeeAlsoLinks, removeSeeAlsoLink } from './see-also.ts'
+import { addSeeAlsoLink, getSeeAlsoLinks, removeSeeAlsoLink } from './related.ts'
 
 Deno.test('getSeeAlsoLinks: returns empty for body without section', () => {
   assertEquals(getSeeAlsoLinks('some text'), [])

@@ -1,7 +1,7 @@
 import { Database } from '@db/sqlite'
 import { join } from '@std/path'
 
-import { config } from '../config.ts'
+import { SETTINGS } from '../stng.ts'
 import { log } from '../log.ts'
 import type { NoteParams, NoteRecord, SearchParams, SearchResult, Store } from './store.ts'
 
@@ -69,7 +69,7 @@ async function ensureVecExtension(dir: string): Promise<string | null> {
 const DDL = [
   `CREATE TABLE IF NOT EXISTS notes (
     id              TEXT PRIMARY KEY,
-    vault           TEXT NOT NULL,
+    tree           TEXT NOT NULL,
     path            TEXT NOT NULL,
     summary         TEXT,
     projects        TEXT NOT NULL DEFAULT '[]',
@@ -79,9 +79,9 @@ const DDL = [
     metadata        TEXT NOT NULL DEFAULT '{}',
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (vault, path)
+    UNIQUE (tree, path)
   )`,
-  `CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(id UNINDEXED, vault UNINDEXED, summary, path)`,
+  `CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(id UNINDEXED, tree UNINDEXED, summary, path)`,
   `CREATE TABLE IF NOT EXISTS links (
     source_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
     target_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -125,7 +125,7 @@ export class SqliteStore implements Store {
   private dir: string
 
   constructor() {
-    this.dir = config.db.sqliteDir
+    this.dir = SETTINGS.db.sqlite.path
   }
 
   async init(): Promise<void> {
@@ -144,7 +144,7 @@ export class SqliteStore implements Store {
         this.db.enableLoadExtension = false
         this.hasVec = true
         this.db.exec(
-          `CREATE VIRTUAL TABLE IF NOT EXISTS notes_vec USING vec0(note_id TEXT PRIMARY KEY, embedding float[${config.llm.embedDimension}])`,
+          `CREATE VIRTUAL TABLE IF NOT EXISTS notes_vec USING vec0(note_id TEXT PRIMARY KEY, embedding float[${SETTINGS.llm.embed.dimension}])`,
         )
         log.info('db', 'sqlite-vec extension loaded')
       } catch (err) {
@@ -168,14 +168,14 @@ export class SqliteStore implements Store {
     const projects = JSON.stringify(p.projects)
     const now = new Date().toISOString()
 
-    this.db.prepare(`DELETE FROM notes WHERE vault = ? AND path = ? AND id != ?`).run(p.vault, p.path, p.id)
+    this.db.prepare(`DELETE FROM notes WHERE tree = ? AND path = ? AND id != ?`).run(p.tree, p.path, p.id)
     this.db.prepare(`DELETE FROM notes_fts WHERE id = ?`).run(p.id)
 
     this.db.prepare(
-      `INSERT INTO notes (id, vault, path, summary, projects, embed, embed_model, content_hash, updated_at)
+      `INSERT INTO notes (id, tree, path, summary, projects, embed, embed_model, content_hash, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
-         vault           = excluded.vault,
+         tree           = excluded.tree,
          path            = excluded.path,
          summary         = excluded.summary,
          projects        = excluded.projects,
@@ -183,11 +183,11 @@ export class SqliteStore implements Store {
          embed_model = excluded.embed_model,
          content_hash    = excluded.content_hash,
          updated_at      = excluded.updated_at`,
-    ).run(p.id, p.vault, p.path, p.summary, projects, vec, p.embedModel, p.contentHash, now)
+    ).run(p.id, p.tree, p.path, p.summary, projects, vec, p.embedModel, p.contentHash, now)
 
-    this.db.prepare(`INSERT INTO notes_fts (id, vault, summary, path) VALUES (?, ?, ?, ?)`).run(
+    this.db.prepare(`INSERT INTO notes_fts (id, tree, summary, path) VALUES (?, ?, ?, ?)`).run(
       p.id,
-      p.vault,
+      p.tree,
       p.summary ?? '',
       p.path,
     )
@@ -205,18 +205,18 @@ export class SqliteStore implements Store {
     return Promise.resolve()
   }
 
-  deleteNote(vault: string, path: string): Promise<void> {
+  deleteNote(tree: string, path: string): Promise<void> {
     type R = { id: string }
-    const row = q<R>(this.db, `SELECT id FROM notes WHERE vault = ? AND path = ?`, vault, path)[0]
+    const row = q<R>(this.db, `SELECT id FROM notes WHERE tree = ? AND path = ?`, tree, path)[0]
     if (row) {
       this.db.prepare(`DELETE FROM notes_fts WHERE id = ?`).run(row.id)
       if (this.hasVec) this.db.prepare(`DELETE FROM notes_vec WHERE note_id = ?`).run(row.id)
-      this.db.prepare(`DELETE FROM notes WHERE vault = ? AND path = ?`).run(vault, path)
+      this.db.prepare(`DELETE FROM notes WHERE tree = ? AND path = ?`).run(tree, path)
     }
     return Promise.resolve()
   }
 
-  getNoteByPath(vault: string, path: string): Promise<NoteRecord | null> {
+  getNoteByPath(tree: string, path: string): Promise<NoteRecord | null> {
     type R = {
       id: string
       content_hash: string | null
@@ -225,8 +225,8 @@ export class SqliteStore implements Store {
     }
     const row = q<R>(
       this.db,
-      `SELECT id, content_hash, embed_model, projects FROM notes WHERE vault = ? AND path = ?`,
-      vault,
+      `SELECT id, content_hash, embed_model, projects FROM notes WHERE tree = ? AND path = ?`,
+      tree,
       path,
     )[0]
     if (!row) return Promise.resolve(null)
@@ -238,17 +238,17 @@ export class SqliteStore implements Store {
     })
   }
 
-  getNoteById(id: string): Promise<{ vault: string; path: string } | null> {
-    type R = { vault: string; path: string }
-    return Promise.resolve(q<R>(this.db, `SELECT vault, path FROM notes WHERE id = ?`, id)[0] ?? null)
+  getNoteById(id: string): Promise<{ tree: string; path: string } | null> {
+    type R = { tree: string; path: string }
+    return Promise.resolve(q<R>(this.db, `SELECT tree, path FROM notes WHERE id = ?`, id)[0] ?? null)
   }
 
   searchNotes(p: SearchParams): Promise<SearchResult[]> {
-    if (this.hasVec) return this.searchNotesVec(p)
-    return this.searchNotesJs(p)
+    if (this.hasVec) return this.searchNotesVector(p)
+    return this.searchNotesCosine(p)
   }
 
-  private searchNotesVec(p: SearchParams): Promise<SearchResult[]> {
+  private searchNotesVector(p: SearchParams): Promise<SearchResult[]> {
     type R = { note_id: string; distance: number }
     const vecRows = q<R>(
       this.db,
@@ -260,11 +260,11 @@ export class SqliteStore implements Store {
 
     const ids = vecRows.map((r) => r.note_id)
     const placeholders = ids.map(() => '?').join(',')
-    type N = { id: string; path: string; summary: string | null; projects: string; vault: string }
+    type N = { id: string; path: string; summary: string | null; projects: string; tree: string }
     const notes = q<N>(
       this.db,
-      `SELECT id, vault, path, summary, projects FROM notes WHERE vault = ? AND id IN (${placeholders})`,
-      p.vault,
+      `SELECT id, tree, path, summary, projects FROM notes WHERE tree = ? AND id IN (${placeholders})`,
+      p.tree,
       ...ids,
     )
 
@@ -286,14 +286,14 @@ export class SqliteStore implements Store {
 
     if (candidates.length === 0) return Promise.resolve([])
 
-    const ftsScores = this.getFtsScores(p.vault, p.query, candidates.map((c) => c.id))
+    const ftsScores = this.getFtsScores(p.tree, p.query, candidates.map((c) => c.id))
     for (const c of candidates) c.score += (1 - (ftsScores.get(c.id) ?? 0)) * p.ftsWeight
 
     candidates.sort((a, b) => a.score - b.score)
     return Promise.resolve(candidates.slice(0, p.limit))
   }
 
-  private searchNotesJs(p: SearchParams): Promise<SearchResult[]> {
+  private searchNotesCosine(p: SearchParams): Promise<SearchResult[]> {
     type R = {
       id: string
       path: string
@@ -303,8 +303,8 @@ export class SqliteStore implements Store {
     }
     const allRows = q<R>(
       this.db,
-      `SELECT id, path, summary, projects, embed FROM notes WHERE vault = ? AND embed IS NOT NULL`,
-      p.vault,
+      `SELECT id, path, summary, projects, embed FROM notes WHERE tree = ? AND embed IS NOT NULL`,
+      p.tree,
     )
 
     type Candidate = SearchResult & { distance: number }
@@ -326,14 +326,14 @@ export class SqliteStore implements Store {
 
     if (candidates.length === 0) return Promise.resolve([])
 
-    const ftsScores = this.getFtsScores(p.vault, p.query, candidates.map((c) => c.id))
+    const ftsScores = this.getFtsScores(p.tree, p.query, candidates.map((c) => c.id))
     for (const c of candidates) c.score += (1 - (ftsScores.get(c.id) ?? 0)) * p.ftsWeight
 
     candidates.sort((a, b) => a.score - b.score)
     return Promise.resolve(candidates.slice(0, p.limit))
   }
 
-  searchNotesFts(vault: string, query: string, limit: number): Promise<SearchResult[]> {
+  searchNotesFts(tree: string, query: string, limit: number): Promise<SearchResult[]> {
     const ftsQuery = toFts5Query(query)
     if (!ftsQuery) return Promise.resolve([])
     try {
@@ -349,11 +349,11 @@ export class SqliteStore implements Store {
         `SELECT n.id, n.path, n.summary, n.projects, bm25(notes_fts) AS rank
          FROM notes_fts
          JOIN notes n ON notes_fts.id = n.id
-         WHERE notes_fts MATCH ? AND n.vault = ?
+         WHERE notes_fts MATCH ? AND n.tree = ?
          ORDER BY rank
          LIMIT ${limit}`,
         ftsQuery,
-        vault,
+        tree,
       )
       return Promise.resolve(
         rows
@@ -370,48 +370,48 @@ export class SqliteStore implements Store {
     }
   }
 
-  getNotesNeedingReindex(currentModel: string): Promise<Array<{ vault: string; path: string }>> {
-    type R = { vault: string; path: string }
+  getNotesNeedingSurvey(currentModel: string): Promise<Array<{ tree: string; path: string }>> {
+    type R = { tree: string; path: string }
     return Promise.resolve(
-      q<R>(this.db, `SELECT vault, path FROM notes WHERE embed IS NULL OR embed_model IS NOT ?`, currentModel),
+      q<R>(this.db, `SELECT tree, path FROM notes WHERE embed IS NULL OR embed_model IS NOT ?`, currentModel),
     )
   }
 
-  checkDuplicate(vault: string, embed: number[], threshold: number): Promise<boolean> {
-    if (this.hasVec) return this.checkDuplicateVec(vault, embed, threshold)
-    return this.checkDuplicateJs(vault, embed, threshold)
+  checkDuplicate(tree: string, embed: number[], threshold: number): Promise<boolean> {
+    if (this.hasVec) return this.checkDuplicateVec(tree, embed, threshold)
+    return this.checkDuplicateJs(tree, embed, threshold)
   }
 
-  private checkDuplicateVec(vault: string, embed: number[], threshold: number): Promise<boolean> {
+  private checkDuplicateVec(tree: string, embed: number[], threshold: number): Promise<boolean> {
     const distance = 1 - threshold
     type R = { note_id: string }
     const match = q<R>(
       this.db,
       `SELECT n.id as note_id FROM notes_vec v JOIN notes n ON v.note_id = n.id
-       WHERE v.embedding MATCH ? AND n.vault = ? AND v.distance < ?
+       WHERE v.embedding MATCH ? AND n.tree = ? AND v.distance < ?
        LIMIT 1`,
       serializeF32(embed),
-      vault,
+      tree,
       distance,
     )
     return Promise.resolve(match.length > 0)
   }
 
-  private checkDuplicateJs(vault: string, embed: number[], threshold: number): Promise<boolean> {
+  private checkDuplicateJs(tree: string, embed: number[], threshold: number): Promise<boolean> {
     type R = { embed: string }
-    const rows = q<R>(this.db, `SELECT embed FROM notes WHERE vault = ? AND embed IS NOT NULL`, vault)
+    const rows = q<R>(this.db, `SELECT embed FROM notes WHERE tree = ? AND embed IS NOT NULL`, tree)
     for (const { embed: embJson } of rows) {
       if ((1 - cosineDistance(embed, JSON.parse(embJson) as number[])) >= threshold) return Promise.resolve(true)
     }
     return Promise.resolve(false)
   }
 
-  resolveNoteTarget(vault: string, target: string): Promise<string | null> {
+  resolveNoteTarget(tree: string, target: string): Promise<string | null> {
     type R = { id: string }
     const row = q<R>(
       this.db,
-      `SELECT id FROM notes WHERE vault = ? AND (path = ? OR path = ? || '.md' OR path LIKE '%/' || ? || '.md' OR path LIKE '%/' || ?) LIMIT 1`,
-      vault,
+      `SELECT id FROM notes WHERE tree = ? AND (path = ? OR path = ? || '.md' OR path LIKE '%/' || ? || '.md' OR path LIKE '%/' || ?) LIMIT 1`,
+      tree,
       target,
       target,
       target,
@@ -432,25 +432,25 @@ export class SqliteStore implements Store {
     return Promise.resolve()
   }
 
-  getNoteEmbed(vault: string, path: string): Promise<number[] | null> {
+  getNoteEmbed(tree: string, path: string): Promise<number[] | null> {
     type R = { embed: string | null }
-    const row = q<R>(this.db, `SELECT embed FROM notes WHERE vault = ? AND path = ?`, vault, path)[0]
+    const row = q<R>(this.db, `SELECT embed FROM notes WHERE tree = ? AND path = ?`, tree, path)[0]
     if (!row?.embed) return Promise.resolve(null)
     return Promise.resolve(JSON.parse(row.embed) as number[])
   }
 
-  getSourcesLinkingTo(targetId: string): Promise<Array<{ id: string; vault: string; path: string }>> {
-    type R = { id: string; vault: string; path: string }
+  getSourcesLinkingTo(targetId: string): Promise<Array<{ id: string; tree: string; path: string }>> {
+    type R = { id: string; tree: string; path: string }
     return Promise.resolve(
       q<R>(
         this.db,
-        `SELECT n.id, n.vault, n.path FROM links l JOIN notes n ON l.source_id = n.id WHERE l.target_id = ?`,
+        `SELECT n.id, n.tree, n.path FROM links l JOIN notes n ON l.source_id = n.id WHERE l.target_id = ?`,
         targetId,
       ),
     )
   }
 
-  private getFtsScores(vault: string, query: string, ids: string[]): Map<string, number> {
+  private getFtsScores(tree: string, query: string, ids: string[]): Map<string, number> {
     const map = new Map<string, number>()
     const ftsQuery = toFts5Query(query)
     if (!ftsQuery || ids.length === 0) return map
@@ -459,9 +459,9 @@ export class SqliteStore implements Store {
       type R = { id: string; rank: number }
       const rows = q<R>(
         this.db,
-        `SELECT notes_fts.id, bm25(notes_fts) AS rank FROM notes_fts WHERE notes_fts MATCH ? AND vault = ? AND id IN (${placeholders})`,
+        `SELECT notes_fts.id, bm25(notes_fts) AS rank FROM notes_fts WHERE notes_fts MATCH ? AND tree = ? AND id IN (${placeholders})`,
         ftsQuery,
-        vault,
+        tree,
         ...ids,
       )
       if (rows.length === 0) return map

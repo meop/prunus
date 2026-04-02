@@ -1,10 +1,10 @@
-import { config } from '../config.ts'
+import { SETTINGS } from '../stng.ts'
 
 export async function embed(text: string): Promise<number[]> {
-  const response = await fetch(`${config.llm.baseUrl}/v1/embeddings`, {
+  const response = await fetch(`http://${SETTINGS.llm.hostname}:${SETTINGS.llm.port}/v1/embeddings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: config.llm.embedModel, input: text }),
+    body: JSON.stringify({ model: SETTINGS.llm.embed.model, input: text }),
   })
   if (!response.ok) {
     const body = await response.text().catch(() => '')

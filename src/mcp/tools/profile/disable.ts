@@ -1,19 +1,20 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { disableProfile } from '../../../vault/profiles.ts'
+
+import { disableProfile } from '../../../tree/profiles.ts'
 
 export function register(server: McpServer): void {
   server.tool(
     'disable_profile',
-    'Disable a capture profile for a vault (removes the symlink).',
+    'Disable a capture profile for a tree (removes the symlink).',
     {
-      vault: z.string().describe('Vault name'),
+      tree: z.string().describe('Tree name'),
       name: z.string().describe('Profile name to disable'),
     },
-    async (args) => {
+    async (args: { tree: string; name: string }) => {
       try {
-        await disableProfile(args.vault, args.name)
-        return { content: [{ type: 'text', text: `Profile "${args.name}" disabled for vault "${args.vault}".` }] }
+        await disableProfile(args.tree, args.name)
+        return { content: [{ type: 'text', text: `Profile "${args.name}" disabled for tree "${args.tree}".` }] }
       } catch (err) {
         return { content: [{ type: 'text', text: `Error: ${String(err)}` }], isError: true }
       }

@@ -2,34 +2,33 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js'
 import { join } from '@std/path'
 
 import { checkAuth } from './auth.ts'
-import { config } from './config.ts'
+import { SETTINGS } from './stng.ts'
 import { getStore, initStore } from './db/index.ts'
 import { getHealth } from './health.ts'
-import { ingest } from './ingest/index.ts'
-import { log } from './log.ts'
 import { embed } from './llm/embed.ts'
+import { log } from './log.ts'
 import { createMcpServer } from './mcp/server.ts'
 import { RequestTransport } from './mcp/transport.ts'
-import { initQueue, requeueNullEmbeddings } from './queue.ts'
-import { startVaultWatcher } from './vault/watcher.ts'
+import { initQueue, surveyStaleNotes } from './queue.ts'
+import { startTreeWatcher } from './tree/watcher.ts'
 
 const ROUTE_CLI = '/cli'
 const ROUTE_HEALTH = '/health'
 const ROUTE_MCP = '/mcp'
-const ROUTE_VAULT = '/vault'
+const ROUTE_GROVE = '/tree'
 
 const SUBPATH_CLI = join(import.meta.dirname ?? '', 'cli')
 
 async function startup(): Promise<void> {
   await initStore()
   await initQueue()
-  await requeueNullEmbeddings()
-  await startVaultWatcher()
+  await surveyStaleNotes()
+  await startTreeWatcher()
   log.info('prunus', 'ready')
 }
 
 Deno.serve(
-  { hostname: config.server.hostname, port: config.server.port },
+  { hostname: SETTINGS.srv?.hostname ?? '0.0.0.0', port: SETTINGS.srv?.port ?? 9100 },
   async (req) => {
     const url = new URL(req.url)
     const { pathname } = url
@@ -66,45 +65,37 @@ Deno.serve(
     const authError = checkAuth(req)
     if (authError) return authError
 
-    // ── Vault routes ────────────────────────────────────────────────────────
-    const ctxMatch = pathname.match(new RegExp(`^${ROUTE_VAULT}/([^/]+)/context$`))
+    // ── Tree routes ────────────────────────────────────────────────────────
+    const ctxMatch = pathname.match(new RegExp(`^${ROUTE_GROVE}/([^/]+)/context$`))
     if (ctxMatch && req.method === 'GET') {
-      const vault = ctxMatch[1]
+      const tree = ctxMatch[1]
       const query = url.searchParams.get('query')?.trim()
       if (!query) return Response.json({ notes: [] })
 
       const store = getStore()
       let results: Array<{ path: string; summary: string }> = []
 
-      if (config.llm.embedModel) {
+      if (SETTINGS.llm?.embed?.model) {
         try {
           const queryEmbedding = await embed(query)
           results = await store.searchNotes({
-            vault,
+            tree,
             queryEmbedding,
             query,
             limit: 5,
-            vectorWeight: config.search.vectorWeight,
-            ftsWeight: config.search.ftsWeight,
-            vectorGate: config.search.vectorGate,
+            vectorWeight: SETTINGS.search.vector.weight,
+            ftsWeight: SETTINGS.search.fts.weight,
+            vectorGate: SETTINGS.search.vector.gate,
           })
         } catch {
-          results = await store.searchNotesFts(vault, query, 5)
+          results = await store.searchNotesFts(tree, query, 5)
         }
       } else {
-        results = await store.searchNotesFts(vault, query, 5)
+        results = await store.searchNotesFts(tree, query, 5)
       }
 
       const notes = results.map((r) => ({ path: r.path, summary: r.summary }))
       return Response.json({ notes })
-    }
-
-    const ingestMatch = pathname.match(new RegExp(`^${ROUTE_VAULT}/([^/]+)/ingest$`))
-    if (ingestMatch && req.method === 'POST') {
-      const vault = ingestMatch[1]
-      const body = await req.json()
-      ingest(vault, body).catch((err) => log.error('ingest', 'background ingest failed', String(err)))
-      return new Response(null, { status: 202 })
     }
 
     // ── MCP ──────────────────────────────────────────────────────────────────
@@ -129,7 +120,7 @@ Deno.serve(
   },
 )
 
-log.info('prunus', `listening on ${config.server.hostname}:${config.server.port} (db: ${config.db.type})`)
+log.info('prunus', `listening on ${SETTINGS.srv.hostname}:${SETTINGS.srv.port} (db: ${SETTINGS.db.type})`)
 
 startup().catch((err) => {
   log.error('prunus', 'startup error', String(err))

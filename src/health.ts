@@ -1,4 +1,4 @@
-import { config } from './config.ts'
+import { SETTINGS } from './stng.ts'
 import { queueDepth } from './queue.ts'
 
 export async function getHealth() {
@@ -11,13 +11,15 @@ export async function getHealth() {
 
   let embedService = 'unavailable'
   try {
-    const resp = await fetch(`${config.llm.baseUrl}/`, { signal: AbortSignal.timeout(2000) })
+    const resp = await fetch(`http://${SETTINGS.llm.hostname}:${SETTINGS.llm.port}/`, {
+      signal: AbortSignal.timeout(90000),
+    })
     if (resp.ok || resp.status < 500) embedService = 'available'
   } catch (_e) { /* unreachable */ }
 
   return {
     status: dbStatus === 'connected' ? 'ok' : 'degraded',
-    db: `${config.db.type}:${dbStatus}`,
+    db: `${SETTINGS.db.type}:${dbStatus}`,
     embed_service: embedService,
     queue_depth: queueDepth(),
   }

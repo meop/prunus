@@ -1,5 +1,6 @@
 import { Pool } from '@db/postgres'
-import { config } from '../config.ts'
+
+import { SETTINGS } from '../stng.ts'
 import { log } from '../log.ts'
 import type { NoteParams, NoteRecord, SearchParams, SearchResult, Store } from './store.ts'
 
@@ -7,11 +8,11 @@ const DDL = [
   `CREATE EXTENSION IF NOT EXISTS vector`,
   `CREATE TABLE IF NOT EXISTS notes (
     id               UUID         PRIMARY KEY,
-    vault            TEXT         NOT NULL,
+    tree            TEXT         NOT NULL,
     path             TEXT         NOT NULL,
     summary          TEXT,
     projects         TEXT[]       NOT NULL DEFAULT '{}',
-    embed        VECTOR(${config.llm.embedDimension}),
+    embed        VECTOR(${SETTINGS.llm.embed.dimension}),
     embed_model  TEXT,
     content_hash     TEXT,
     fts              TSVECTOR     GENERATED ALWAYS AS (
@@ -20,7 +21,7 @@ const DDL = [
     metadata         JSONB        NOT NULL DEFAULT '{}',
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (vault, path)
+    UNIQUE (tree, path)
   )`,
   `CREATE INDEX IF NOT EXISTS notes_embed_hnsw ON notes USING hnsw (embed vector_cosine_ops)`,
   `CREATE INDEX IF NOT EXISTS notes_fts_gin ON notes USING gin (fts)`,
@@ -39,11 +40,11 @@ export class PgStore implements Store {
   constructor() {
     this.pool = new Pool(
       {
-        hostname: config.db.hostname,
-        port: config.db.port,
-        database: config.db.database,
-        user: config.db.user,
-        password: config.db.password,
+        hostname: SETTINGS.db.postgres.hostname,
+        port: SETTINGS.db.postgres.port,
+        database: SETTINGS.db.postgres.database,
+        user: SETTINGS.db.postgres.username,
+        password: SETTINGS.db.postgres.password,
       },
       5,
       true,
@@ -69,12 +70,12 @@ export class PgStore implements Store {
     const vec = p.embed ? `[${p.embed.join(',')}]` : null
     const client = await this.pool.connect()
     try {
-      await client.queryArray(`DELETE FROM notes WHERE vault = $1 AND path = $2 AND id != $3`, [p.vault, p.path, p.id])
+      await client.queryArray(`DELETE FROM notes WHERE tree = $1 AND path = $2 AND id != $3`, [p.tree, p.path, p.id])
       await client.queryArray(
-        `INSERT INTO notes (id, vault, path, summary, projects, embed, embed_model, content_hash)
+        `INSERT INTO notes (id, tree, path, summary, projects, embed, embed_model, content_hash)
          VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8)
          ON CONFLICT (id) DO UPDATE SET
-           vault           = EXCLUDED.vault,
+           tree           = EXCLUDED.tree,
            path            = EXCLUDED.path,
            summary         = EXCLUDED.summary,
            projects        = EXCLUDED.projects,
@@ -82,23 +83,23 @@ export class PgStore implements Store {
            embed_model = EXCLUDED.embed_model,
            content_hash    = EXCLUDED.content_hash,
            updated_at      = NOW()`,
-        [p.id, p.vault, p.path, p.summary, p.projects, vec, p.embedModel, p.contentHash],
+        [p.id, p.tree, p.path, p.summary, p.projects, vec, p.embedModel, p.contentHash],
       )
     } finally {
       client.release()
     }
   }
 
-  async deleteNote(vault: string, path: string): Promise<void> {
+  async deleteNote(tree: string, path: string): Promise<void> {
     const client = await this.pool.connect()
     try {
-      await client.queryArray(`DELETE FROM notes WHERE vault = $1 AND path = $2`, [vault, path])
+      await client.queryArray(`DELETE FROM notes WHERE tree = $1 AND path = $2`, [tree, path])
     } finally {
       client.release()
     }
   }
 
-  async getNoteByPath(vault: string, path: string): Promise<NoteRecord | null> {
+  async getNoteByPath(tree: string, path: string): Promise<NoteRecord | null> {
     const client = await this.pool.connect()
     try {
       const res = await client.queryObject<{
@@ -107,8 +108,8 @@ export class PgStore implements Store {
         embed_model: string | null
         projects: string[]
       }>(
-        `SELECT id, content_hash, embed_model, projects FROM notes WHERE vault = $1 AND path = $2`,
-        [vault, path],
+        `SELECT id, content_hash, embed_model, projects FROM notes WHERE tree = $1 AND path = $2`,
+        [tree, path],
       )
       const r = res.rows[0]
       if (!r) return null
@@ -123,11 +124,11 @@ export class PgStore implements Store {
     }
   }
 
-  async getNoteById(id: string): Promise<{ vault: string; path: string } | null> {
+  async getNoteById(id: string): Promise<{ tree: string; path: string } | null> {
     const client = await this.pool.connect()
     try {
-      const res = await client.queryObject<{ vault: string; path: string }>(
-        `SELECT vault, path FROM notes WHERE id = $1`,
+      const res = await client.queryObject<{ tree: string; path: string }>(
+        `SELECT tree, path FROM notes WHERE id = $1`,
         [id],
       )
       return res.rows[0] ?? null
@@ -151,12 +152,12 @@ export class PgStore implements Store {
            (embed <=> $1::vector) * $5::float8 +
            (1.0 - ts_rank(fts, plainto_tsquery('english', $2))) * $6::float8 AS score
          FROM notes
-         WHERE vault = $3
+         WHERE tree = $3
            AND embed IS NOT NULL
            AND (embed <=> $1::vector) < $7::float8
          ORDER BY score ASC
          LIMIT $4`,
-        [vec, p.query, p.vault, p.limit, p.vectorWeight, p.ftsWeight, p.vectorGate],
+        [vec, p.query, p.tree, p.limit, p.vectorWeight, p.ftsWeight, p.vectorGate],
       )
       return res.rows.map((r) => ({
         id: r.id,
@@ -170,7 +171,7 @@ export class PgStore implements Store {
     }
   }
 
-  async searchNotesFts(vault: string, query: string, limit: number): Promise<SearchResult[]> {
+  async searchNotesFts(tree: string, query: string, limit: number): Promise<SearchResult[]> {
     const client = await this.pool.connect()
     try {
       const res = await client.queryObject<{
@@ -183,11 +184,11 @@ export class PgStore implements Store {
         `SELECT id, path, summary, projects,
            1.0 - ts_rank(fts, plainto_tsquery('english', $1)) AS score
          FROM notes
-         WHERE vault = $2
+         WHERE tree = $2
            AND fts @@ plainto_tsquery('english', $1)
          ORDER BY score ASC
          LIMIT $3`,
-        [query, vault, limit],
+        [query, tree, limit],
       )
       return res.rows.map((r) => ({
         id: r.id,
@@ -201,11 +202,11 @@ export class PgStore implements Store {
     }
   }
 
-  async getNotesNeedingReindex(currentModel: string): Promise<Array<{ vault: string; path: string }>> {
+  async getNotesNeedingSurvey(currentModel: string): Promise<Array<{ tree: string; path: string }>> {
     const client = await this.pool.connect()
     try {
-      const res = await client.queryObject<{ vault: string; path: string }>(
-        `SELECT vault, path FROM notes WHERE embed IS NULL OR embed_model IS DISTINCT FROM $1`,
+      const res = await client.queryObject<{ tree: string; path: string }>(
+        `SELECT tree, path FROM notes WHERE embed IS NULL OR embed_model IS DISTINCT FROM $1`,
         [currentModel],
       )
       return res.rows
@@ -214,13 +215,13 @@ export class PgStore implements Store {
     }
   }
 
-  async checkDuplicate(vault: string, embed: number[], threshold: number): Promise<boolean> {
+  async checkDuplicate(tree: string, embed: number[], threshold: number): Promise<boolean> {
     const vec = `[${embed.join(',')}]`
     const client = await this.pool.connect()
     try {
       const res = await client.queryArray(
-        `SELECT 1 FROM notes WHERE vault = $1 AND embed IS NOT NULL AND (embed <=> $2::vector) < $3 LIMIT 1`,
-        [vault, vec, 1 - threshold],
+        `SELECT 1 FROM notes WHERE tree = $1 AND embed IS NOT NULL AND (embed <=> $2::vector) < $3 LIMIT 1`,
+        [tree, vec, 1 - threshold],
       )
       return res.rows.length > 0
     } finally {
@@ -228,14 +229,14 @@ export class PgStore implements Store {
     }
   }
 
-  async resolveNoteTarget(vault: string, target: string): Promise<string | null> {
+  async resolveNoteTarget(tree: string, target: string): Promise<string | null> {
     const client = await this.pool.connect()
     try {
       const res = await client.queryObject<{ id: string }>(
-        `SELECT id FROM notes WHERE vault = $1 AND (
+        `SELECT id FROM notes WHERE tree = $1 AND (
            path = $2 OR path = $2 || '.md' OR path LIKE '%/' || $2 || '.md' OR path LIKE '%/' || $2
          ) LIMIT 1`,
-        [vault, target],
+        [tree, target],
       )
       return res.rows[0]?.id ?? null
     } finally {
@@ -243,12 +244,12 @@ export class PgStore implements Store {
     }
   }
 
-  async getNoteEmbed(vault: string, path: string): Promise<number[] | null> {
+  async getNoteEmbed(tree: string, path: string): Promise<number[] | null> {
     const client = await this.pool.connect()
     try {
       const res = await client.queryObject<{ embed: string | null }>(
-        `SELECT embed::text FROM notes WHERE vault = $1 AND path = $2`,
-        [vault, path],
+        `SELECT embed::text FROM notes WHERE tree = $1 AND path = $2`,
+        [tree, path],
       )
       const embed = res.rows[0]?.embed
       if (!embed) return null
@@ -258,11 +259,11 @@ export class PgStore implements Store {
     }
   }
 
-  async getSourcesLinkingTo(targetId: string): Promise<Array<{ id: string; vault: string; path: string }>> {
+  async getSourcesLinkingTo(targetId: string): Promise<Array<{ id: string; tree: string; path: string }>> {
     const client = await this.pool.connect()
     try {
-      const res = await client.queryObject<{ id: string; vault: string; path: string }>(
-        `SELECT n.id, n.vault, n.path FROM links l JOIN notes n ON l.source_id = n.id WHERE l.target_id = $1`,
+      const res = await client.queryObject<{ id: string; tree: string; path: string }>(
+        `SELECT n.id, n.tree, n.path FROM links l JOIN notes n ON l.source_id = n.id WHERE l.target_id = $1`,
         [targetId],
       )
       return res.rows

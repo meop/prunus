@@ -1,5 +1,7 @@
 import { join } from '@std/path'
-import { config } from '../config.ts'
+
+import { profilesDirs } from '../cfg.ts'
+import { SETTINGS } from '../stng.ts'
 import { log } from '../log.ts'
 
 interface ProfileSections {
@@ -48,8 +50,8 @@ function combineSections(profiles: ProfileSections[]): string {
   return parts.join('\n')
 }
 
-export async function loadProfile(vault: string): Promise<string> {
-  const enabledDir = join(config.vault.base, vault, '.profiles')
+export async function loadProfile(tree: string): Promise<string> {
+  const enabledDir = join(SETTINGS.grove.path, tree, '.profiles')
 
   const entries: Deno.DirEntry[] = []
   try {
@@ -79,7 +81,7 @@ export async function loadProfile(vault: string): Promise<string> {
 
 export async function listProfileNames(): Promise<string[]> {
   const names = new Set<string>()
-  for (const dir of [config.vault.profilesDir, config.vault.secretProfilesDir]) {
+  for (const dir of profilesDirs) {
     try {
       for await (const entry of Deno.readDir(dir)) {
         if (entry.isFile && entry.name.endsWith('.md')) names.add(entry.name.replace(/\.md$/, ''))
@@ -89,8 +91,8 @@ export async function listProfileNames(): Promise<string[]> {
   return [...names].sort()
 }
 
-export async function listEnabledProfiles(vault: string): Promise<string[]> {
-  const enabledDir = join(config.vault.base, vault, '.profiles')
+export async function listEnabledProfiles(tree: string): Promise<string[]> {
+  const enabledDir = join(SETTINGS.grove.path, tree, '.profiles')
   try {
     const names: string[] = []
     for await (const entry of Deno.readDir(enabledDir)) {
@@ -102,8 +104,8 @@ export async function listEnabledProfiles(vault: string): Promise<string[]> {
   }
 }
 
-export async function enableProfile(vault: string, name: string): Promise<void> {
-  const enabledDir = join(config.vault.base, vault, '.profiles')
+export async function enableProfile(tree: string, name: string): Promise<void> {
+  const enabledDir = join(SETTINGS.grove.path, tree, '.profiles')
   const target = join(enabledDir, `${name}.md`)
 
   const source = await findProfileFile(name)
@@ -117,7 +119,7 @@ export async function enableProfile(vault: string, name: string): Promise<void> 
 }
 
 async function findProfileFile(name: string): Promise<string | null> {
-  for (const dir of [config.vault.profilesDir, config.vault.secretProfilesDir]) {
+  for (const dir of profilesDirs) {
     const candidate = join(dir, `${name}.md`)
     try {
       await Deno.stat(candidate)
@@ -127,8 +129,8 @@ async function findProfileFile(name: string): Promise<string | null> {
   return null
 }
 
-export async function disableProfile(vault: string, name: string): Promise<void> {
-  const target = join(config.vault.base, vault, '.profiles', `${name}.md`)
+export async function disableProfile(tree: string, name: string): Promise<void> {
+  const target = join(SETTINGS.grove.path, tree, '.profiles', `${name}.md`)
   await Deno.remove(target).catch(() => {
     throw new Error(`profile "${name}" not enabled`)
   })

@@ -43,9 +43,7 @@ $RECYCLE.BIN/
 .env
 .env.local
 
-# settings symlink (points to settings-dev.toml)
-settings.toml
-
 # project
 .db/
-.vault/
+.grove/
+settings.toml

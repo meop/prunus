@@ -18,7 +18,7 @@ path = '/vol/note/prunus'
 # hostname = 'arch.lan'
 # port = 5432
 # database = 'prunus'
-# user = 'postgres'
+# username = 'postgres'
 # password = 'postgres'
 
 [llm]
@@ -33,11 +33,18 @@ model = 'text-embedding-bge-m3'
 # must match model
 dimension = 1024
 
-[vault]
+[cfg]
+dirs = ['prunus-config']
+
+[grove]
 path = '/data/note/prunus'
 
-# [search]
-# vector_weight = 0.6
-# fts_weight = 0.4
-# vector_gate = 0.8
-# dedup_threshold = 0.85
+# [search.dedup]
+# threshold = 0.85
+
+# [search.fts]
+# weight = 0.4
+
+# [search.vector]
+# gate = 0.8
+# weight = 0.6

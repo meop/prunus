@@ -1,24 +1,25 @@
-import { join } from '@std/path'
 import { walk } from '@std/fs'
+import { join } from '@std/path'
 
-import { config } from './config.ts'
+import { SETTINGS } from './stng.ts'
 import { getStore } from './db/index.ts'
-import { embed } from './llm/embed.ts'
 import { runAgent } from './llm/agent.ts'
+import { embed } from './llm/embed.ts'
 import { log } from './log.ts'
-import { contentHash, extractWikilinks, parseFrontmatter } from './vault/parser.ts'
-import { readNote } from './vault/reader.ts'
-import { removeSeeAlsoLink } from './vault/see-also.ts'
-import { writeNote } from './vault/writer.ts'
-import { vaultTools } from './vault/agent-tools.ts'
+import { contentHash, extractWikilinks, parseFrontmatter } from './tree/parser.ts'
+import { readNote } from './tree/reader.ts'
+import { removeSeeAlsoLink } from './tree/related.ts'
+import { treeTools } from './tree/tools.ts'
+import { writeNote } from './tree/writer.ts'
 
 export type Job =
-  | { type: 'reindex'; vault: string; path: string }
-  | { type: 'delete'; vault: string; path: string }
-  | { type: 'prune'; vault: string; topic: string; excerpt: string }
-  | { type: 'shape'; vault: string }
+  | { type: 'survey'; tree: string; path: string }
+  | { type: 'grow'; tree: string; topic: string; excerpt: string }
+  | { type: 'heal'; tree: string; changedPath: string; summary: string; change: 'modified' | 'deleted' }
+  | { type: 'prune'; tree: string; path: string; triggerHeal?: boolean }
+  | { type: 'shape'; tree: string }
 
-const PRUNE_SYSTEM = `You are updating a developer's knowledge vault named "{{vault}}".
+const GROW_SYSTEM = `You are updating a developer's knowledge tree named "{{tree}}".
 
 You have one piece of knowledge to integrate. Use the tools to:
 1. Search for and read any existing notes that might be related
@@ -26,18 +27,27 @@ You have one piece of knowledge to integrate. Use the tools to:
 3. Make all necessary changes — including updating links in related notes
 4. Call finish() when done
 
-Vault-relative paths only. Lowercase kebab-case. No vault name prefix.
+Tree-relative paths only. Lowercase kebab-case. No tree name prefix.
 Link to related notes using [[path/to/note]] syntax (no .md extension).`
 
-const SHAPE_SYSTEM = `You are reorganizing a developer's knowledge vault named "{{vault}}".
+const HEAL_SYSTEM = `You are reviewing a developer's knowledge tree named "{{tree}}" after a note change.
 
-Review the vault contents and improve its quality:
+The note "{{path}}" was {{change}}. Its topic: {{summary}}
+
+Use the tools to:
+1. Search for notes related to this topic
+2. Read and update any that reference outdated information, contain stale links, or should reflect this change
+3. Call finish() when done — if nothing needs updating, just call finish()`
+
+const SHAPE_SYSTEM = `You are reorganizing a developer's knowledge tree named "{{tree}}".
+
+Review the tree contents and improve its quality:
 - Merge notes that cover the same topic
 - Delete notes with no lasting value
 - Update outdated or thin notes with better content
 - Fix or add [[wikilinks]] between related notes
 
-Use the tools to read, write, and delete notes as needed. Work through the vault systematically.
+Use the tools to read, write, and delete notes as needed. Work through the tree systematically.
 Call finish() when done.`
 
 const pending = new Map<string, Job>()
@@ -46,23 +56,23 @@ let running = 0
 const CONCURRENCY = 2
 
 const chunkCounts = new Map<string, number>()
-const STATS_PATH = join(config.db.sqliteDir, 'stats.json')
+const STATS_PATH = join(SETTINGS.db.sqlite.path, 'stats.json')
 
 interface Stats {
-  prune_count: Record<string, number>
+  grow_count: Record<string, number>
 }
 
 async function loadStats(): Promise<void> {
   try {
     const raw = await Deno.readTextFile(STATS_PATH)
     const data = JSON.parse(raw) as Stats
-    for (const [vault, count] of Object.entries(data.prune_count ?? {})) chunkCounts.set(vault, count)
+    for (const [tree, count] of Object.entries(data.grow_count ?? {})) chunkCounts.set(tree, count)
     log.debug('queue', `loaded stats: ${JSON.stringify(data)}`)
   } catch { /* file doesn't exist yet */ }
 }
 
 async function saveStats(): Promise<void> {
-  const stats: Stats = { prune_count: Object.fromEntries(chunkCounts) }
+  const stats: Stats = { grow_count: Object.fromEntries(chunkCounts) }
   await Deno.writeTextFile(STATS_PATH, JSON.stringify(stats, null, 2))
 }
 
@@ -71,9 +81,13 @@ const drainWaiters: Array<() => void> = []
 function jobKey(job: Job): string {
   switch (job.type) {
     case 'shape':
-      return `shape:${job.vault}`
+      return `shape:${job.tree}`
+    case 'heal':
+      return `heal:${job.tree}:${job.changedPath}`
+    case 'grow':
+      return `grow:${job.tree}:${job.topic}`
     default:
-      return `${job.type}:${job.vault}:${'path' in job ? job.path : job.topic}`
+      return `${job.type}:${job.tree}:${job.path}`
   }
 }
 
@@ -98,12 +112,12 @@ export async function initQueue(): Promise<void> {
   await loadStats()
 }
 
-export async function requeueNullEmbeddings(): Promise<void> {
+export async function surveyStaleNotes(): Promise<void> {
   try {
-    const notes = await getStore().getNotesNeedingReindex(config.llm.embedModel)
+    const notes = await getStore().getNotesNeedingReindex(SETTINGS.llm.embed.model)
     if (notes.length > 0) {
       log.info('queue', `re-queuing ${notes.length} note(s) with missing/stale embeddings`)
-      for (const { vault, path } of notes) enqueue({ type: 'reindex', vault, path })
+      for (const { tree, path } of notes) enqueue({ type: 'survey', tree, path })
     }
   } catch (err) {
     log.warn('queue', 'could not check for stale embeddings', String(err))
@@ -129,8 +143,12 @@ function tick(): void {
 }
 
 async function processWithRetry(job: Job): Promise<void> {
-  const label = 'path' in job ? `${job.vault}/${job.path}` : job.vault
-  const MAX = 3
+  const label = 'path' in job
+    ? `${job.tree}/${job.path}`
+    : 'changedPath' in job
+    ? `${job.tree}/${job.changedPath}`
+    : job.tree
+  const MAX = 5
   for (let attempt = 1; attempt <= MAX; attempt++) {
     try {
       await processJob(job)
@@ -141,7 +159,7 @@ async function processWithRetry(job: Job): Promise<void> {
         log.error('queue', `giving up: ${job.type} ${label}`)
         return
       }
-      await sleep(1000 * Math.pow(2, attempt - 1))
+      await sleep(5000 * Math.pow(2, attempt - 1))
     }
   }
 }
@@ -149,116 +167,145 @@ async function processWithRetry(job: Job): Promise<void> {
 async function processJob(job: Job): Promise<void> {
   const store = getStore()
 
-  if (job.type === 'reindex') {
-    const { frontmatter: fm, body } = await readNote(job.vault, job.path)
+  if (job.type === 'survey') {
+    const { frontmatter: fm, body } = await readNote(job.tree, job.path)
     const hash = contentHash(fm.summary, body)
-    const existing = await store.getNoteByPath(job.vault, job.path)
-    if (existing?.contentHash === hash && existing.embedModel === config.llm.embedModel) {
-      log.debug('queue', `unchanged: ${job.vault}/${job.path}`)
+    const existing = await store.getNoteByPath(job.tree, job.path)
+    if (existing?.contentHash === hash && existing.embedModel === SETTINGS.llm.embed.model) {
+      log.debug('queue', `unchanged: ${job.tree}/${job.path}`)
       return
     }
     const vec = await embed(fm.summary || body.slice(0, 500))
     await store.upsertNote({
-      vault: job.vault,
+      tree: job.tree,
       path: job.path,
       id: fm.id,
       summary: fm.summary,
       projects: fm.projects,
       embed: vec,
-      embedModel: config.llm.embedModel,
+      embedModel: SETTINGS.llm.embed.model,
       contentHash: hash,
     })
     const resolved: Array<{ targetId: string; type: string }> = []
     for (const target of extractWikilinks(body)) {
-      const targetId = await store.resolveNoteTarget(job.vault, target)
+      const targetId = await store.resolveNoteTarget(job.tree, target)
       if (targetId && targetId !== fm.id) resolved.push({ targetId, type: 'wikilink' })
     }
     await store.upsertLinks(fm.id, resolved)
-    log.debug('queue', `indexed: ${job.vault}/${job.path}`)
+    log.debug('queue', `indexed: ${job.tree}/${job.path}`)
     return
   }
 
-  if (job.type === 'delete') {
-    const record = await store.getNoteByPath(job.vault, job.path)
+  // Cascade: prune(triggerHeal) → heal. prune(no flag) → stops here.
+  if (job.type === 'prune') {
+    const record = await store.getNoteByPath(job.tree, job.path)
     if (record) {
       const stem = job.path.replace(/\.md$/, '')
       const sources = await store.getSourcesLinkingTo(record.id)
       for (const src of sources) {
-        if (src.vault !== job.vault) continue
+        if (src.tree !== job.tree) continue
         try {
-          const { frontmatter: fm, body } = await readNote(src.vault, src.path)
+          const { frontmatter: fm, body } = await readNote(src.tree, src.path)
           const updated = removeSeeAlsoLink(body, stem)
           if (updated !== body) {
-            await writeNote(src.vault, src.path, fm, updated)
-            enqueue({ type: 'reindex', vault: src.vault, path: src.path })
-            log.debug('queue', `removed stale link to ${stem} in ${src.vault}/${src.path}`)
+            await writeNote(src.tree, src.path, fm, updated)
+            enqueue({ type: 'survey', tree: src.tree, path: src.path })
+            log.debug('queue', `removed stale link to ${stem} in ${src.tree}/${src.path}`)
           }
         } catch (err) {
-          log.warn('queue', `stale-link cleanup failed for ${src.vault}/${src.path}`, String(err))
+          log.warn('queue', `stale-link cleanup failed for ${src.tree}/${src.path}`, String(err))
         }
       }
+      if (job.triggerHeal) {
+        enqueue({ type: 'heal', tree: job.tree, changedPath: job.path, summary: stem, change: 'deleted' })
+      }
     }
-    await store.deleteNote(job.vault, job.path)
-    log.debug('queue', `deleted: ${job.vault}/${job.path}`)
+    await store.deleteNote(job.tree, job.path)
+    log.debug('queue', `pruned: ${job.tree}/${job.path}`)
     return
   }
 
-  if (job.type === 'prune') {
-    if (!config.llm.chatModel) return
+  if (job.type === 'grow') {
+    if (!SETTINGS.llm.chat.model) return
     const modified = new Set<string>()
     const deleted = new Set<string>()
-    const tools = vaultTools(job.vault, modified, deleted)
-    const notes = await readVaultSummaries(job.vault)
+    const tools = treeTools(job.tree, modified, deleted)
+    const notes = await readTreeSummaries(job.tree)
 
-    const systemPrompt = PRUNE_SYSTEM.replace(/\{\{vault\}\}/g, job.vault)
+    const systemPrompt = GROW_SYSTEM.replace(/\{\{tree\}\}/g, job.tree)
     const notesList = notes.map((n) => `  ${n.path}: ${n.summary}`).join('\n')
     const userMessage =
-      `Knowledge to integrate:\n${job.topic}\n\nContext from transcript:\n${job.excerpt}\n\nExisting vault notes (path: summary):\n${
+      `Knowledge to integrate:\n${job.topic}\n\nContext from transcript:\n${job.excerpt}\n\nExisting tree notes (path: summary):\n${
         notesList || '  (empty)'
       }`
 
     await runAgent(systemPrompt, userMessage, tools)
 
-    for (const path of deleted) enqueue({ type: 'delete', vault: job.vault, path })
-    for (const path of modified) enqueue({ type: 'reindex', vault: job.vault, path })
-    log.info('queue', `prune done: ${modified.size} written, ${deleted.size} deleted`)
+    // grow outputs: survey modified, prune deleted — no triggerHeal (grow handles its own ripple)
+    for (const path of deleted) enqueue({ type: 'prune', tree: job.tree, path })
+    for (const path of modified) enqueue({ type: 'survey', tree: job.tree, path })
+    log.info('queue', `grow [${job.tree}] done: ${modified.size} written, ${deleted.size} deleted`)
 
-    const count = (chunkCounts.get(job.vault) ?? 0) + 1
-    chunkCounts.set(job.vault, count)
+    const count = (chunkCounts.get(job.tree) ?? 0) + 1
+    chunkCounts.set(job.tree, count)
     await saveStats()
-    if (count % config.vault.shapeInterval === 0) {
-      log.info('queue', `shape triggered after ${count} chunks for vault=${job.vault}`)
-      enqueue({ type: 'shape', vault: job.vault })
+    if (count % SETTINGS.grove.shape.interval === 0) {
+      log.info('queue', `shape [${job.tree}] triggered after ${count} chunks`)
+      enqueue({ type: 'shape', tree: job.tree })
     }
     return
   }
 
   if (job.type === 'shape') {
-    if (!config.llm.chatModel) return
+    if (!SETTINGS.llm.chat.model) return
     const modified = new Set<string>()
     const deleted = new Set<string>()
-    const tools = vaultTools(job.vault, modified, deleted)
-    const notes = await readVaultSummaries(job.vault)
+    const tools = treeTools(job.tree, modified, deleted)
+    const notes = await readTreeSummaries(job.tree)
     if (notes.length === 0) return
 
-    const systemPrompt = SHAPE_SYSTEM.replace(/\{\{vault\}\}/g, job.vault)
+    const systemPrompt = SHAPE_SYSTEM.replace(/\{\{tree\}\}/g, job.tree)
     const notesList = notes.map((n) => `  ${n.path}: ${n.summary}`).join('\n')
-    const userMessage = `Vault contents:\n${notesList}`
+    const userMessage = `Tree contents:\n${notesList}`
 
     await runAgent(systemPrompt, userMessage, tools, 20)
 
-    for (const path of deleted) enqueue({ type: 'delete', vault: job.vault, path })
-    for (const path of modified) enqueue({ type: 'reindex', vault: job.vault, path })
-    log.info('queue', `shape done: ${modified.size} written, ${deleted.size} deleted`)
+    // shape outputs: survey modified, prune deleted — no triggerHeal (shape handles its own ripple)
+    for (const path of deleted) enqueue({ type: 'prune', tree: job.tree, path })
+    for (const path of modified) enqueue({ type: 'survey', tree: job.tree, path })
+    log.info('queue', `shape [${job.tree}] done: ${modified.size} written, ${deleted.size} deleted`)
+    return
+  }
+
+  // Cascade: heal → survey modified, prune deleted (no triggerHeal — heal does not re-trigger heal).
+  // Re-entry can only happen via the watcher seeing heal's file writes, which is bounded by job dedup.
+  if (job.type === 'heal') {
+    if (!SETTINGS.llm.chat.model) return
+    const modified = new Set<string>()
+    const deleted = new Set<string>()
+    const tools = treeTools(job.tree, modified, deleted)
+
+    const systemPrompt = HEAL_SYSTEM
+      .replace(/\{\{tree\}\}/g, job.tree)
+      .replace(/\{\{path\}\}/g, job.changedPath)
+      .replace(/\{\{change\}\}/g, job.change)
+      .replace(/\{\{summary\}\}/g, job.summary)
+    const userMessage = `Review notes related to: ${job.summary}`
+
+    await runAgent(systemPrompt, userMessage, tools)
+
+    for (const path of deleted) enqueue({ type: 'prune', tree: job.tree, path })
+    for (const path of modified) enqueue({ type: 'survey', tree: job.tree, path })
+    log.info('queue', `heal [${job.tree}] done (${job.change}): ${modified.size} written, ${deleted.size} deleted`)
     return
   }
 }
 
-async function readVaultSummaries(vault: string): Promise<Array<{ path: string; summary: string }>> {
-  const base = join(config.vault.base, vault)
+async function readTreeSummaries(tree: string): Promise<Array<{ path: string; summary: string }>> {
+  const base = join(SETTINGS.grove.path, tree)
   const notes: Array<{ path: string; summary: string }> = []
   try {
-    for await (const entry of walk(base, { exts: ['.md'], includeDirs: false })) {
+    for await (const entry of walk(base, { exts: ['.md'], includeDirs: false, skip: [/\/\.profiles(\/|$)/] })) {
       const path = entry.path.slice(base.length + 1)
       try {
         const raw = await Deno.readTextFile(entry.path)
@@ -266,7 +313,7 @@ async function readVaultSummaries(vault: string): Promise<Array<{ path: string; 
         notes.push({ path, summary: fm.summary })
       } catch { /* skip unreadable */ }
     }
-  } catch { /* vault doesn't exist yet */ }
+  } catch { /* tree doesn't exist yet */ }
   return notes.sort((a, b) => a.path.localeCompare(b.path))
 }
 

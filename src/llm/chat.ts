@@ -1,4 +1,4 @@
-import { config } from '../config.ts'
+import { SETTINGS } from '../stng.ts'
 
 export interface TextMessage {
   role: 'system' | 'user' | 'assistant'
@@ -40,10 +40,10 @@ export interface ChatResponse {
 }
 
 async function request(messages: Message[], tools?: ToolDefinition[], temperature = 0.2): Promise<ChatResponse> {
-  const body: Record<string, unknown> = { model: config.llm.chatModel, messages, temperature }
+  const body: Record<string, unknown> = { model: SETTINGS.llm.chat.model, messages, temperature }
   if (tools?.length) body.tools = tools
 
-  const response = await fetch(`${config.llm.baseUrl}/v1/chat/completions`, {
+  const response = await fetch(`http://${SETTINGS.llm.hostname}:${SETTINGS.llm.port}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

@@ -1,26 +1,15 @@
 import { walk } from '@std/fs'
 import { join } from '@std/path'
 
-import { config } from '../config.ts'
+import { SETTINGS } from '../stng.ts'
 import { chat } from '../llm/chat.ts'
 import { log } from '../log.ts'
 import { enqueue } from '../queue.ts'
-import { loadProfile } from '../vault/profiles.ts'
+import { loadProfile } from '../tree/profiles.ts'
 
-export interface TranscriptEntry {
-  role: 'user' | 'assistant'
-  content: string
-  ts?: string
-}
-
-export interface IngestRequest {
+export interface UpdateTreeRequest {
   project: string
-  transcript: TranscriptEntry[]
-  since?: string
-}
-
-export interface IngestResult {
-  chunks: number
+  document: string
 }
 
 interface Chunk {
@@ -29,24 +18,26 @@ interface Chunk {
 }
 
 const ANALYSIS_PROMPT =
-  `You are analyzing a developer's session transcript to identify distinct pieces of knowledge worth saving to the vault.
+  `You are a knowledge librarian receiving a prepared session summary document from an AI developer assistant.
 {{profile}}
-For each piece of knowledge, provide:
-- "topic": 1-2 sentence description of what was learned
-- "excerpt": the relevant portion of the transcript that captures this knowledge (verbatim or lightly edited, enough context to reconstruct the insight)
+The document summarizes conclusions, decisions, and validated approaches from a work session — dead ends and failed attempts have already been filtered out by the author.
 
-Be selective — only extract knowledge matching the vault profile above.
-Each chunk should be self-contained: a reader with no other context should understand what was learned.
+For each distinct piece of knowledge in the document, provide:
+- "topic": 1-2 sentence description of what was learned or decided
+- "excerpt": the relevant portion of the document capturing this knowledge (verbatim or lightly edited, enough context to reconstruct the insight independently)
+
+Be selective — only extract knowledge matching the tree profile above.
+Each chunk must be self-contained: a reader with no other context should understand what was learned.
 
 Respond with JSON only (empty array if nothing worth saving):
 [{"topic": "...", "excerpt": "..."}]`
 
-async function listVaultFiles(vault: string): Promise<string[]> {
-  const vaultPath = join(config.vault.base, vault)
+async function listTreeFiles(tree: string): Promise<string[]> {
+  const treePath = join(SETTINGS.grove.path, tree)
   const files: string[] = []
   try {
-    for await (const entry of walk(vaultPath, { exts: ['.md'], includeDirs: false })) {
-      files.push(entry.path.slice(vaultPath.length + 1))
+    for await (const entry of walk(treePath, { exts: ['.md'], includeDirs: false })) {
+      files.push(entry.path.slice(treePath.length + 1))
     }
   } catch (e) {
     if (!(e instanceof Deno.errors.NotFound)) throw e
@@ -54,59 +45,49 @@ async function listVaultFiles(vault: string): Promise<string[]> {
   return files.sort()
 }
 
-export async function ingest(vault: string, req: IngestRequest): Promise<IngestResult> {
-  if (!config.llm.chatModel) {
-    log.warn('ingest', 'llm.chat.model not set — skipping')
-    return { chunks: 0 }
+export async function updateTree(tree: string, req: UpdateTreeRequest): Promise<void> {
+  if (!SETTINGS.llm.chat.model) {
+    log.warn('updateTree', 'llm.chat.model not set — skipping')
+    return
   }
 
-  let entries = req.transcript
-  if (req.since) {
-    const since = new Date(req.since).getTime()
-    entries = entries.filter((e) => !e.ts || new Date(e.ts).getTime() > since)
-  }
-  if (entries.length < 2) return { chunks: 0 }
-
-  const [profile, vaultFiles] = await Promise.all([loadProfile(vault), listVaultFiles(vault)])
+  const [profile, treeFiles] = await Promise.all([loadProfile(tree), listTreeFiles(tree)])
 
   if (!profile) {
-    log.info('ingest', `vault=${vault} has no active profiles — skipping`)
-    return { chunks: 0 }
+    log.info('updateTree', `[${tree}] no active profiles — skipping`)
+    return
   }
 
-  log.info('ingest', `analyzing ${entries.length} turns for vault=${vault} project=${req.project}`)
+  log.info('updateTree', `[${tree}] analyzing document (project: ${req.project})`)
 
-  const transcriptText = entries.map((e) => `${e.role.toUpperCase()}: ${e.content}`).join('\n\n')
-  const profileSection = `\nVAULT PROFILE:\n${profile}\n`
+  const profileSection = `\nGROVE PROFILE:\n${profile}\n`
   const systemPrompt = ANALYSIS_PROMPT.replace('{{profile}}', profileSection)
-  const vaultSection = vaultFiles.length > 0
-    ? `\nCurrent vault files:\n${vaultFiles.map((f) => `  ${f}`).join('\n')}\n`
+  const treeSection = treeFiles.length > 0
+    ? `\nCurrent tree files:\n${treeFiles.map((f) => `  ${f}`).join('\n')}\n`
     : ''
 
   let chunks: Chunk[] = []
   try {
     const response = await chat([
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: `Project: ${req.project}${vaultSection}\nTranscript:\n${transcriptText}` },
+      { role: 'user', content: `Project: ${req.project}${treeSection}\nDocument:\n${req.document}` },
     ])
     chunks = parseChunks(response)
   } catch (err) {
-    log.error('ingest', 'analysis failed', String(err))
-    return { chunks: 0 }
+    log.error('updateTree', 'analysis failed', String(err))
+    return
   }
 
   if (chunks.length === 0) {
-    log.info('ingest', 'no knowledge chunks identified')
-    return { chunks: 0 }
+    log.info('updateTree', `[${tree}] no knowledge chunks extracted`)
+    return
   }
 
-  log.info('ingest', `identified ${chunks.length} chunk(s) — enqueueing jobs`)
+  log.info('updateTree', `[${tree}] identified ${chunks.length} chunk(s), enqueueing`)
 
   for (const chunk of chunks) {
-    enqueue({ type: 'prune', vault, topic: chunk.topic, excerpt: chunk.excerpt })
+    enqueue({ type: 'grow', tree, topic: chunk.topic, excerpt: chunk.excerpt })
   }
-
-  return { chunks: chunks.length }
 }
 
 function parseChunks(text: string): Chunk[] {

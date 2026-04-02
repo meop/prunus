@@ -1,99 +1,86 @@
 # prunus
 
-A shared knowledge store for LLM coding sessions. Insights, patterns, and architectural decisions accumulate in plain
-Markdown vaults and are exposed via MCP for retrieval during future sessions.
-
-Session transcripts are automatically processed by a local LLM at session end — notes are extracted, deduplicated, and
-saved without manual intervention.
+A shared knowledge store for AI coding sessions. Insights, decisions, and patterns accumulate in plain Markdown trees
+and are surfaced via MCP during future sessions across all your machines and tools.
 
 ## How it works
 
+**Capturing knowledge** — explicit, curated:
+
 ```
-Session ends
-  └─ Stop hook sends transcript to prunus server
-       └─ Server calls local LLM: "what's worth saving?"
-            └─ Dedup check against existing vault
-                 └─ Auto-save as Markdown → index → available for future sessions
+/prunus ingest "focus on the architectural decisions"
+  └─ Session AI composes a summary document from the current session context
+       └─ Sends document to prunus via contribute MCP tool
+            └─ Server LLM extracts distinct knowledge chunks from the document
+                 └─ Dedup check against existing tree → save as Markdown → index
 ```
 
-On each prompt submit, the UserPromptSubmit hook queries the vault for relevant notes and injects their summaries as
-context, with a hint to use `read_note` for full content. Claude then calls `search_notes` or `read_note` via MCP when
-it needs specific knowledge.
+**Using knowledge** — automatic, per-prompt:
+
+```
+User sends a prompt
+  └─ Hook/plugin queries prunus: GET /tree/{tree}/context?query=<prompt>
+       └─ Relevant note summaries injected as context
+            └─ Session AI calls read_note or search_notes via MCP for full content
+```
 
 ## Architecture
 
 | Component                 | Role                                                                            |
 | ------------------------- | ------------------------------------------------------------------------------- |
-| **Deno HTTP server**      | MCP at `/mcp`, ingest at `/vault/{vault}/ingest`, health/context endpoints      |
+| **Deno HTTP server**      | MCP at `/mcp`, context search at `/tree/{tree}/context`, health endpoint        |
 | **SQLite** (default)      | Metadata + FTS5 + JS-side cosine similarity — zero external dependencies        |
-| **PostgreSQL + pgvector** | Optional — HNSW index + generated TSVECTOR for larger deployments               |
+| **PostgreSQL + pgvector** | Optional — HNSW index + TSVECTOR for larger deployments                         |
 | **OpenAI-compatible API** | Embed model for search; chat model for note extraction (e.g. Ollama, LM Studio) |
-| **Vault directories**     | Source of truth — one subdirectory per named vault under `vault.path`           |
+| **Tree directories**      | Source of truth — one subdirectory per named tree under `grove.path`            |
 
-The database is derived from the vault and fully rebuildable by rescanning. Source of truth is always the Markdown
-files.
+The database is derived from the grove and fully rebuildable by rescanning.
 
 ## MCP Tools
 
-| Tool              | Description                                              |
-| ----------------- | -------------------------------------------------------- |
-| `search_notes`    | Hybrid vector + FTS search across all notes in the vault |
-| `read_note`       | Read a note's full Markdown content                      |
-| `list_vaults`     | List available vault names                               |
-| `create_vault`    | Create a new named vault directory                       |
-| `delete_vault`    | Delete a vault and all its contents                      |
-| `list_profiles`   | List all profiles + which are enabled for a vault        |
-| `enable_profile`  | Enable a profile for a vault (create symlink)            |
-| `disable_profile` | Disable a profile for a vault (remove symlink)           |
+| Tool              | Description                                                   |
+| ----------------- | ------------------------------------------------------------- |
+| `contribute`      | Submit a prepared session summary document for LLM extraction |
+| `search_notes`    | Hybrid vector + FTS search across all notes in the tree       |
+| `read_note`       | Read a note's full Markdown content by path or ID             |
+| `list_trees`      | List available tree names                                     |
+| `create_tree`     | Create a new named tree directory                             |
+| `delete_tree`     | Delete a tree and all its contents                            |
+| `list_profiles`   | List all profiles + which are enabled for a tree              |
+| `enable_profile`  | Enable a profile for a tree                                   |
+| `disable_profile` | Disable a profile for a tree                                  |
 
 ## Setup
 
 ### Server
 
 ```sh
-# SQLite (default — no other services needed)
 cp settings-dev.toml settings.toml
-# edit settings.toml: set vault.path, llm.hostname, llm.chat.model, llm.embed.model
-deno task dev
+# edit settings.toml: set grove.path, llm.hostname, llm.chat.model, llm.embed.model
+deno task start
 ```
 
 For PostgreSQL, set `db.type = "postgres"` and fill in the `[db.postgres]` section.
 
-### Client (Claude Code)
+### Clients
+
+Supports Claude Code, Gemini CLI, OpenCode, and Qwen-Code. The installer detects which are installed:
 
 ```sh
-deno run --allow-all src/cli/install.ts
-# prompts for server URL, default vault, auth token
-# installs hooks and patches ~/.claude/settings.json
+deno run --allow-all http://prunus-host:9100/cli/install
 ```
 
-Per-project vault override — add to `.prunus/settings.json` in the project root:
+Installs per tool: MCP server registration, per-prompt context hook, `/prunus` slash command.
 
-```json
-{
-  "vault": "myproject"
-}
+Then in any project:
+
+```sh
+/prunus init   # creates .prunus/settings.json, sets tree and project
 ```
 
-### MCP server config
+See `CLIENTS.md` for per-tool details, hook formats, and settings.
 
-Add to Claude Code (or any MCP client):
-
-```json
-{
-  "mcpServers": {
-    "prunus": {
-      "type": "http",
-      "url": "http://<host>:9100/mcp",
-      "headers": { "Authorization": "Bearer <token>" }
-    }
-  }
-}
-```
-
-## Settings (`settings.toml`)
-
-`settings.toml` is a symlink → `settings-dev.toml`. Use `PRUNUS_ENV=test` to load `settings-test.toml`.
+## Server Settings (`settings.toml`)
 
 ```toml
 [srv]
@@ -112,9 +99,6 @@ type = "sqlite"   # sqlite | postgres
 [db.sqlite]
 path = "/path/to/data"
 
-# [db.postgres]
-# hostname = "..." port = 5432 database = "prunus" user = "..." password = "..."
-
 [llm]
 hostname = "localhost"
 port = 1234
@@ -126,43 +110,16 @@ model = "..."   # chat model for note extraction (e.g. qwen2.5, llama3.2)
 model = "..."          # embedding model (e.g. nomic-embed-text, bge-m3)
 dimension = 1024       # must match model
 
-[vault]
-path = "/path/to/vaults"   # required; each subdirectory is a named vault
-
-# [search]
-# vector_weight = 0.6  fts_weight = 0.4  vector_gate = 0.8  dedup_threshold = 0.85
+[grove]
+path = "/path/to/trees"   # required; each subdirectory is a named tree
 ```
 
 ## Client Settings
 
-Client hooks read JSON config (no `.env` files). Settings are layered:
+- `~/.prunus/settings.json` — user-level: `url`, `token`, default `tree`
+- `.prunus/settings.json` — project-level (walk-up from cwd): `tree`, `enabled`, `project`
 
-- `~/.prunus/settings.json` — user-level (serverUrl, authToken, default vault, markerTtlDays)
-- `.prunus/settings.json` (walk up from cwd) — project-level (vault, enabled, project)
-
-```json
-{
-  "serverUrl": "http://prunus-host:9100",
-  "authToken": "...",
-  "vault": "code",
-  "enabled": true,
-  "markerTtlDays": 30
-}
-```
-
-Profiles are enabled server-side via symlinks in `{vault}/.profiles/`.
-
-## Development
-
-```sh
-deno task dev     # run with hot reload
-deno task fmt     # format
-deno task lint    # lint
-deno task check   # type check
-deno task test    # tests
-```
-
-## Vault format
+## Note Format
 
 Notes are plain Markdown with YAML frontmatter managed by the server:
 
@@ -174,7 +131,6 @@ created: 2026-03-23T10:00:00Z
 updated: 2026-03-23T10:00:00Z
 projects:
   - my-app
-  - other-app
 tags:
   - typescript
 ---
@@ -182,6 +138,14 @@ tags:
 Note content here...
 ```
 
-Vaults are Obsidian-compatible — `[[wikilinks]]` between notes are stored as link relationships in the index.
+Trees are Obsidian-compatible — `[[wikilinks]]` between notes are stored as link relationships in the index.
 
-All notes in a vault are always searchable — there is no per-project filtering.
+## Development
+
+```sh
+deno task check   # type check
+deno task format  # format
+deno task lint    # lint
+deno task start   # run with hot reload
+deno task test    # tests
+```

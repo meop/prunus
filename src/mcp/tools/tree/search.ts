@@ -1,20 +1,20 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
-import { config } from '../../../config.ts'
+import { SETTINGS } from '../../../stng.ts'
 import { getStore } from '../../../db/index.ts'
 import { embed } from '../../../llm/embed.ts'
 
 export function register(server: McpServer): void {
   server.tool(
     'search_notes',
-    'Search the knowledge vault by semantic similarity. Returns compact summaries — use read_note to get full content.',
+    'Search the knowledge tree by semantic similarity. Returns compact summaries — use read_note to get full content.',
     {
-      vault: z.string().describe('Vault name (e.g. code, recipe)'),
+      tree: z.string().describe('Tree name (e.g. code, recipe)'),
       query: z.string().describe('Natural language search query'),
       limit: z.number().optional().describe('Max results (default 5)'),
     },
-    async (args) => {
+    async (args: { tree: string; query: string; limit?: number }) => {
       try {
         const store = getStore()
         const limit = args.limit ?? 5
@@ -23,17 +23,17 @@ export function register(server: McpServer): void {
         try {
           const queryEmbedding = await embed(args.query)
           results = await store.searchNotes({
-            vault: args.vault,
+            tree: args.tree,
             queryEmbedding,
             query: args.query,
             limit,
-            vectorWeight: config.search.vectorWeight,
-            ftsWeight: config.search.ftsWeight,
-            vectorGate: config.search.vectorGate,
+            vectorWeight: SETTINGS.search.vector.weight,
+            ftsWeight: SETTINGS.search.fts.weight,
+            vectorGate: SETTINGS.search.vector.gate,
           })
         } catch {
           // Embed service unavailable — fall back to FTS only
-          results = await store.searchNotesFts(args.vault, args.query, limit)
+          results = await store.searchNotesFts(args.tree, args.query, limit)
         }
 
         if (results.length === 0) {

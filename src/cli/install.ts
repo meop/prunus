@@ -60,19 +60,19 @@ function promptUpdate(path: string): boolean {
   return ask(`? update ${path} [y, [n]]:`).trim().toLowerCase() !== 'n'
 }
 
-async function promptConfig(): Promise<{ prunusUrl: string; authToken: string }> {
+async function promptConfig(): Promise<{ prunusUrl: string; token: string }> {
   const existing = await readJsonFile(join(PRUNUS_DIR, 'settings.json'))
-  const hasUrl = !!existing.serverUrl
-  const defaultUrl = String(existing.serverUrl ?? 'http://localhost:9100')
-  const defaultToken = String(existing.authToken ?? '')
-  const urlSuffix = hasUrl ? ` (${existing.serverUrl}):` : ':'
+  const hasUrl = !!existing.url
+  const defaultUrl = String(existing.url ?? 'http://localhost:9100')
+  const defaultToken = String(existing.token ?? '')
+  const urlSuffix = hasUrl ? ` (${existing.url}):` : ':'
   const prunusUrl = ask(`? ${hasUrl ? 'update' : 'set'} prunus server url [http://localhost:9100]${urlSuffix}`) ||
     defaultUrl
-  const hasToken = !!existing.authToken
+  const hasToken = !!existing.token
   const tokenSuffix = hasToken ? ' (******):' : ':'
-  const authToken = ask(`? ${hasToken ? 'update' : 'set'} auth token [leave empty if none]${tokenSuffix}`) ||
+  const token = ask(`? ${hasToken ? 'update' : 'set'} auth token [leave empty if none]${tokenSuffix}`) ||
     defaultToken
-  return { prunusUrl, authToken }
+  return { prunusUrl, token }
 }
 
 // ── file helpers ──────────────────────────────────────────────────────────────
@@ -95,18 +95,6 @@ async function writeFile(dest: string, getContent: () => Promise<string>): Promi
   if (isNew) console.log(`wrote ${dest}`)
 }
 
-async function copyOrFetch(src: string, dest: string): Promise<void> {
-  await Deno.writeTextFile(dest, await fetchContent(src))
-  console.log(`wrote ${dest}`)
-}
-
-async function installSharedFiles(): Promise<void> {
-  const hooksDir = join(PRUNUS_DIR, 'hooks')
-  await Deno.mkdir(hooksDir, { recursive: true })
-  await copyOrFetch(new URL('hooks/mod.ts', BASE_URL).href, join(hooksDir, 'mod.ts'))
-  await copyOrFetch(new URL('hooks/deno.json', BASE_URL).href, join(hooksDir, 'deno.json'))
-}
-
 async function installCommand(
   srcUrl: string,
   destDir: string,
@@ -119,15 +107,6 @@ async function installCommand(
     const content = await fetchContent(srcUrl)
     return transform ? transform(content) : content
   })
-}
-
-async function cacheHooks(hookFiles: string[]): Promise<void> {
-  const { code } = await new Deno.Command('deno', {
-    args: ['cache', '--no-check', ...hookFiles],
-    stdout: 'inherit',
-    stderr: 'inherit',
-  }).output()
-  if (code !== 0) console.error('warning: deno cache failed — hooks will fetch imports on first run')
 }
 
 async function readJsonFile(path: string): Promise<Record<string, unknown>> {
@@ -143,9 +122,44 @@ async function writeJsonFile(path: string, data: Record<string, unknown>): Promi
   await writeFile(path, () => Promise.resolve(JSON.stringify(data, null, 2) + '\n'))
 }
 
-async function writeUserSettings(serverUrl: string, authToken: string): Promise<void> {
-  const settings: Record<string, unknown> = { serverUrl }
-  if (authToken) settings.authToken = authToken
+async function copyOrFetch(src: string, dest: string): Promise<void> {
+  await Deno.writeTextFile(dest, await fetchContent(src))
+  console.log(`wrote ${dest}`)
+}
+
+async function installSharedFiles(): Promise<void> {
+  const hooksDir = join(PRUNUS_DIR, 'hooks')
+  await Deno.mkdir(hooksDir, { recursive: true })
+  await copyOrFetch(new URL('hooks/mod.ts', BASE_URL).href, join(hooksDir, 'mod.ts'))
+  await copyOrFetch(new URL('hooks/deno.json', BASE_URL).href, join(hooksDir, 'deno.json'))
+}
+
+async function cacheHooks(hookFiles: string[]): Promise<void> {
+  const { code } = await new Deno.Command('deno', {
+    args: ['cache', '--no-check', ...hookFiles],
+    stdout: 'inherit',
+    stderr: 'inherit',
+  }).output()
+  if (code !== 0) console.error('warning: deno cache failed — hooks will fetch imports on first run')
+}
+
+function purgeStaleHooks(hooks: Record<string, unknown>, hooksDir: string, keep: string[]): void {
+  for (const event of Object.keys(hooks)) {
+    if (keep.includes(event)) continue
+    const entries = hooks[event] as unknown[]
+    const filtered = entries.filter((e) => !JSON.stringify(e).includes(hooksDir))
+    if (filtered.length === 0) {
+      delete hooks[event]
+      console.log(`removed stale hook: ${event}`)
+    } else {
+      hooks[event] = filtered
+    }
+  }
+}
+
+async function writeUserSettings(url: string, token: string): Promise<void> {
+  const settings: Record<string, unknown> = { url }
+  if (token) settings.token = token
   await writeJsonFile(join(PRUNUS_DIR, 'settings.json'), settings)
 }
 
@@ -215,8 +229,8 @@ if (restArgs.length > 0) {
   }
 }
 
-const { prunusUrl, authToken } = await promptConfig()
-await writeUserSettings(prunusUrl, authToken)
+const { prunusUrl, token } = await promptConfig()
+await writeUserSettings(prunusUrl, token)
 console.log('')
 
 for (let i = 0; i < tools.length; i++) {
@@ -235,15 +249,15 @@ for (let i = 0; i < tools.length; i++) {
 
     const settings = await readJsonFile(CLAUDE_SETTINGS)
     const hooks = (settings.hooks ?? {}) as Record<string, unknown>
-    const makeHook = (script: string) => [{
+    purgeStaleHooks(hooks, HOOKS_DIR, ['UserPromptSubmit'])
+    hooks['UserPromptSubmit'] = [{
       matcher: '',
-      hooks: [{ type: 'command', command: `deno run --allow-all --no-check "${script}"` }],
+      hooks: [{
+        type: 'command',
+        command: `deno run --allow-all --no-check "${join(HOOKS_DIR, 'user-prompt-submit.ts')}"`,
+      }],
     }]
-    hooks['UserPromptSubmit'] = makeHook(join(HOOKS_DIR, 'user-prompt-submit.ts'))
-    hooks['Stop'] = makeHook(join(HOOKS_DIR, 'stop.ts'))
-    hooks['PreCompact'] = makeHook(join(HOOKS_DIR, 'pre-compact.ts'))
     settings.hooks = hooks
-
     await writeJsonFile(CLAUDE_SETTINGS, settings)
 
     // MCP servers are read from ~/.claude.json, NOT ~/.claude/settings.json
@@ -251,21 +265,22 @@ for (let i = 0; i < tools.length; i++) {
     const claudeJson = await readJsonFile(CLAUDE_JSON)
     const mcpServers = (claudeJson.mcpServers ?? {}) as Record<string, unknown>
     const mcpEntry: Record<string, unknown> = { type: 'http', url: `${prunusUrl}/mcp` }
-    if (authToken) mcpEntry.headers = { Authorization: `Bearer ${authToken}` }
+    if (token) mcpEntry.headers = { Authorization: `Bearer ${token}` }
     mcpServers.prunus = mcpEntry
     claudeJson.mcpServers = mcpServers
     await writeJsonFile(CLAUDE_JSON, claudeJson)
 
     await installSharedFiles()
+    try {
+      await Deno.remove(HOOKS_DIR, { recursive: true })
+      console.log(`purged ${HOOKS_DIR}`)
+    } catch { /* not found */ }
     await Deno.mkdir(HOOKS_DIR, { recursive: true })
-    for (const hook of ['user-prompt-submit.ts', 'stop.ts', 'pre-compact.ts']) {
-      await copyOrFetch(new URL(`hooks/claude-code/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
-    }
-    await cacheHooks([
+    await copyOrFetch(
+      new URL('hooks/claude-code/user-prompt-submit.ts', BASE_URL).href,
       join(HOOKS_DIR, 'user-prompt-submit.ts'),
-      join(HOOKS_DIR, 'stop.ts'),
-      join(HOOKS_DIR, 'pre-compact.ts'),
-    ])
+    )
+    await cacheHooks([join(HOOKS_DIR, 'user-prompt-submit.ts')])
   }
 
   // ── gemini-cli ────────────────────────────────────────────────────────────────
@@ -287,34 +302,33 @@ for (let i = 0; i < tools.length; i++) {
 
     const settings = await readJsonFile(GEMINI_SETTINGS)
     const hooks = (settings.hooks ?? {}) as Record<string, unknown>
-    // Gemini CLI hook format: no matcher field
-    const makeHook = (name: string, script: string) => [{
-      hooks: [{ type: 'command', command: `deno run --allow-all --no-check "${script}"`, name: `prunus-${name}` }],
+    purgeStaleHooks(hooks, HOOKS_DIR, ['BeforeAgent'])
+    hooks['BeforeAgent'] = [{
+      hooks: [{
+        type: 'command',
+        command: `deno run --allow-all --no-check "${join(HOOKS_DIR, 'before-agent.ts')}"`,
+        name: 'prunus-before-agent',
+      }],
     }]
-    hooks['BeforeAgent'] = makeHook('before-agent', join(HOOKS_DIR, 'before-agent.ts'))
-    hooks['SessionEnd'] = makeHook('session-end', join(HOOKS_DIR, 'session-end.ts'))
-    hooks['PreCompress'] = makeHook('pre-compress', join(HOOKS_DIR, 'pre-compress.ts'))
     settings.hooks = hooks
 
     // Gemini CLI uses httpUrl for StreamableHTTP MCP servers
     const mcpServers = (settings.mcpServers ?? {}) as Record<string, unknown>
     const mcpEntry: Record<string, unknown> = { httpUrl: `${prunusUrl}/mcp` }
-    if (authToken) mcpEntry.headers = { Authorization: `Bearer ${authToken}` }
+    if (token) mcpEntry.headers = { Authorization: `Bearer ${token}` }
     mcpServers.prunus = mcpEntry
     settings.mcpServers = mcpServers
 
     await writeJsonFile(GEMINI_SETTINGS, settings)
 
     await installSharedFiles()
+    try {
+      await Deno.remove(HOOKS_DIR, { recursive: true })
+      console.log(`purged ${HOOKS_DIR}`)
+    } catch { /* not found */ }
     await Deno.mkdir(HOOKS_DIR, { recursive: true })
-    for (const hook of ['before-agent.ts', 'session-end.ts', 'pre-compress.ts']) {
-      await copyOrFetch(new URL(`hooks/gemini-cli/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
-    }
-    await cacheHooks([
-      join(HOOKS_DIR, 'before-agent.ts'),
-      join(HOOKS_DIR, 'session-end.ts'),
-      join(HOOKS_DIR, 'pre-compress.ts'),
-    ])
+    await copyOrFetch(new URL('hooks/gemini-cli/before-agent.ts', BASE_URL).href, join(HOOKS_DIR, 'before-agent.ts'))
+    await cacheHooks([join(HOOKS_DIR, 'before-agent.ts')])
   }
 
   // ── opencode ──────────────────────────────────────────────────────────────────
@@ -334,7 +348,7 @@ for (let i = 0; i < tools.length; i++) {
     // The plugin is auto-discovered from the plugins/ directory — no explicit registration needed.
     const config = await readJsonFile(OPENCODE_JSON)
     const mcpEntry: Record<string, unknown> = { type: 'remote', url: `${prunusUrl}/mcp` }
-    if (authToken) mcpEntry.headers = { Authorization: `Bearer ${authToken}` }
+    if (token) mcpEntry.headers = { Authorization: `Bearer ${token}` }
     const mcp = (config.mcp ?? {}) as Record<string, unknown>
     mcp.prunus = mcpEntry
     config.mcp = mcp
@@ -364,38 +378,40 @@ for (let i = 0; i < tools.length; i++) {
 
     const settings = await readJsonFile(QWEN_SETTINGS)
     const hooks = (settings.hooks ?? {}) as Record<string, unknown>
-    // Qwen-Code hook format: no matcher field (confirmed from integration tests)
-    const makeHook = (name: string, script: string) => [{
-      hooks: [{ type: 'command', command: `deno run --allow-all --no-check "${script}"`, name: `prunus-${name}` }],
+    purgeStaleHooks(hooks, HOOKS_DIR, ['UserPromptSubmit'])
+    hooks['UserPromptSubmit'] = [{
+      hooks: [{
+        type: 'command',
+        command: `deno run --allow-all --no-check "${join(HOOKS_DIR, 'user-prompt-submit.ts')}"`,
+        name: 'prunus-user-prompt-submit',
+      }],
     }]
-    hooks['UserPromptSubmit'] = makeHook('user-prompt-submit', join(HOOKS_DIR, 'user-prompt-submit.ts'))
-    hooks['SessionEnd'] = makeHook('session-end', join(HOOKS_DIR, 'session-end.ts'))
-    hooks['PreCompact'] = makeHook('pre-compact', join(HOOKS_DIR, 'pre-compact.ts'))
     settings.hooks = hooks
 
     // Qwen-Code is a Gemini CLI fork; httpUrl selects StreamableHTTP transport
     const mcpServers = (settings.mcpServers ?? {}) as Record<string, unknown>
     const mcpEntry: Record<string, unknown> = { httpUrl: `${prunusUrl}/mcp` }
-    if (authToken) mcpEntry.headers = { Authorization: `Bearer ${authToken}` }
+    if (token) mcpEntry.headers = { Authorization: `Bearer ${token}` }
     mcpServers.prunus = mcpEntry
     settings.mcpServers = mcpServers
 
     await writeJsonFile(QWEN_SETTINGS, settings)
 
     await installSharedFiles()
+    try {
+      await Deno.remove(HOOKS_DIR, { recursive: true })
+      console.log(`purged ${HOOKS_DIR}`)
+    } catch { /* not found */ }
     await Deno.mkdir(HOOKS_DIR, { recursive: true })
-    for (const hook of ['user-prompt-submit.ts', 'session-end.ts', 'pre-compact.ts']) {
-      await copyOrFetch(new URL(`hooks/qwen-code/${hook}`, BASE_URL).href, join(HOOKS_DIR, hook))
-    }
-    await cacheHooks([
+    await copyOrFetch(
+      new URL('hooks/qwen-code/user-prompt-submit.ts', BASE_URL).href,
       join(HOOKS_DIR, 'user-prompt-submit.ts'),
-      join(HOOKS_DIR, 'session-end.ts'),
-      join(HOOKS_DIR, 'pre-compact.ts'),
-    ])
+    )
+    await cacheHooks([join(HOOKS_DIR, 'user-prompt-submit.ts')])
   }
 } // end for (const tool of tools)
 
 console.log('')
 console.log('=== post-install ===')
-console.log('restart cli tool for hooks and mcp to take effect')
-console.log('run `/prunus init` in a session to init for cwd')
+console.log('restart cli tool for mcp to take effect')
+console.log('run `/prunus init` in a session to configure prunus for a project')

@@ -1,9 +1,9 @@
-import { settings } from './settings.ts'
+import { SETTINGS } from './stng.ts'
 
 type Level = 'debug' | 'info' | 'warn' | 'error'
 
 const ORDER: Record<Level, number> = { debug: 0, info: 1, warn: 2, error: 3 }
-const minLevel = (settings.log?.level ?? 'info') as Level
+const minLevel = (SETTINGS.log?.level ?? 'info') as Level
 
 function write(level: Level, scope: string, message: string, data?: unknown): void {
   if (ORDER[level] < ORDER[minLevel]) return

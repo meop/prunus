@@ -1,4 +1,4 @@
-import { config } from '../config.ts'
+import { SETTINGS } from '../stng.ts'
 import { PgStore } from './pg.ts'
 import { SqliteStore } from './sqlite.ts'
 import type { Store } from './store.ts'
@@ -11,7 +11,7 @@ export function getStore(): Store {
 }
 
 export async function initStore(): Promise<Store> {
-  if (config.db.type === 'postgres') {
+  if (SETTINGS.db.type === 'postgres') {
     _store = new PgStore()
   } else {
     _store = new SqliteStore()

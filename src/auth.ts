@@ -1,7 +1,7 @@
-import { config } from './config.ts'
+import { SETTINGS } from './stng.ts'
 
 export function checkAuth(req: Request): Response | null {
-  const token = config.server.authToken
+  const token = SETTINGS.srv?.auth?.token ?? ''
   if (!token) return null // no auth configured
 
   const header = req.headers.get('Authorization')

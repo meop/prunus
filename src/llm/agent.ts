@@ -12,7 +12,7 @@ const FINISH_TOOL: ToolDefinition = {
   type: 'function',
   function: {
     name: 'finish',
-    description: 'Call when you have finished all vault updates for this task.',
+    description: 'Call when you have finished all tree updates for this task.',
     parameters: { type: 'object', properties: {} },
   },
 }
@@ -58,12 +58,13 @@ export async function runAgent(
       } else {
         try {
           const args = JSON.parse(call.function.arguments) as Record<string, unknown>
+          const key = 'path' in args ? String(args.path) : 'query' in args ? String(args.query) : ''
+          log.debug('agent', `${call.function.name}${key ? ` ${key}` : ''}`)
           result = await tool.run(args)
         } catch (err) {
           result = `Error: ${String(err)}`
         }
       }
-      log.debug('agent', `${call.function.name} → ${result.slice(0, 120)}`)
       messages.push({ role: 'tool', tool_call_id: call.id, content: result })
     }
 

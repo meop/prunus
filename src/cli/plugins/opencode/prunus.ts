@@ -1,36 +1,35 @@
 /**
- * Prunus plugin for OpenCode
+ * Prunus plugin for OpenCode — context injection
  *
  * Drop this file in ~/.config/opencode/plugins/ and it is auto-loaded.
  * No package.json or explicit registration needed.
  *
  * Capabilities:
- *   - Injects vault profile into the system prompt on every LLM call
- *     (experimental.chat.system.transform — closest equivalent to first-turn injection)
- *   - Ingests session transcript to prunus after each turn
- *     (event: session.idle — incremental, same marker pattern as Claude Code's Stop hook)
- *   - Injects vault profile as context before session compaction
- *     (experimental.session.compacting)
+ *   - Per-prompt: fetches relevant tree notes based on the user's message text
+ *     (chat.message → cache notes → experimental.chat.system.transform → inject)
  *
- * Runtime: OpenCode loads plugins in-process via its Bun runtime. This file is NOT run
- * with deno run — it uses Bun globals (Bun.file, Bun.write, Bun.$, process).
+ * Runtime: OpenCode loads plugins in-process via its Bun runtime.
  * fetch and AbortSignal are Bun globals.
  *
- * Configuration: ~/.prunus/settings.json (serverUrl, authToken) and
- * .prunus/settings.json walked up from the session directory (vault, enabled, project).
+ * Configuration: ~/.prunus/settings.json (url, token) and
+ * .prunus/settings.json walked up from the session directory (tree, enabled, project).
  * Run /prunus init from any project to enable prunus there.
  */
 
 // deno-lint-ignore-file no-explicit-any no-process-global
-import { $ } from 'bun'
 import { dirname, join } from 'node:path'
 
 interface PrunusSettings {
-  serverUrl?: string
-  authToken?: string
-  vault?: string
+  url?: string
+  token?: string
+  tree?: string
   enabled?: boolean
   project?: string
+}
+
+interface ContextNote {
+  path: string
+  summary: string
 }
 
 async function readSettingsFile(dir: string): Promise<PrunusSettings> {
@@ -55,19 +54,11 @@ async function findProjectSettings(cwd: string): Promise<{ settings: PrunusSetti
   return { settings: {}, dir: null }
 }
 
-export const prunus = ({ directory, client }: { directory: string; client: any }) => {
+export const prunus = ({ directory }: { directory: string; client: any }) => {
   const HOME = process.env.HOME ?? process.env.USERPROFILE ?? '~'
-  const MARKER_DIR = `${HOME}/.prunus/markers`
 
-  // Settings loaded lazily and cached for the plugin instance lifetime
   let settingsPromise:
-    | Promise<{
-      serverUrl: string
-      authToken: string
-      vault: string
-      enabled: boolean
-      project: string
-    }>
+    | Promise<{ url: string; token: string; tree: string; enabled: boolean; project: string }>
     | undefined
 
   function getSettings() {
@@ -77,9 +68,9 @@ export const prunus = ({ directory, client }: { directory: string; client: any }
         const { settings: projectSettings, dir: projectDir } = await findProjectSettings(directory)
         const projectDirName = projectDir?.split('/').filter(Boolean).pop() ?? ''
         return {
-          serverUrl: userSettings.serverUrl ?? 'http://localhost:9100',
-          authToken: userSettings.authToken ?? '',
-          vault: projectSettings.vault ?? userSettings.vault ?? '',
+          url: userSettings.url ?? 'http://localhost:9100',
+          token: userSettings.token ?? '',
+          tree: projectSettings.tree ?? userSettings.tree ?? '',
           enabled: projectSettings.enabled ?? userSettings.enabled ?? true,
           project: projectSettings.project ?? projectDirName,
         }
@@ -88,149 +79,58 @@ export const prunus = ({ directory, client }: { directory: string; client: any }
     return settingsPromise
   }
 
-  function authHeaders(authToken: string): Record<string, string> {
-    return authToken ? { Authorization: `Bearer ${authToken}` } : {}
+  function authHeaders(token: string): Record<string, string> {
+    return token ? { Authorization: `Bearer ${token}` } : {}
   }
 
-  async function fetchProfile(): Promise<string | null> {
-    const { serverUrl, authToken, vault, enabled } = await getSettings()
-    if (!vault || !enabled) return null
-    try {
-      const url = `${serverUrl}/vault/${vault}/context`
-      const resp = await fetch(url, {
-        headers: authHeaders(authToken),
-        signal: AbortSignal.timeout(5000),
-      })
-      if (!resp.ok) return null
-      const data = (await resp.json()) as { profile?: string }
-      return data.profile?.trim() ?? null
-    } catch {
-      return null
-    }
-  }
-
-  // Profile fetched once and cached
-  let cachedProfile: string | null | undefined = undefined
-
-  async function getCachedProfile(): Promise<string | null> {
-    if (cachedProfile !== undefined) return cachedProfile
-    cachedProfile = await fetchProfile()
-    return cachedProfile
-  }
-
-  async function readMarker(sessionID: string): Promise<string> {
-    try {
-      return (await Bun.file(`${MARKER_DIR}/${sessionID}.last-ingested`).text()).trim()
-    } catch {
-      return ''
-    }
-  }
-
-  async function writeMarker(sessionID: string, ts: string): Promise<void> {
-    await $`mkdir -p ${MARKER_DIR}`.quiet()
-    await Bun.write(`${MARKER_DIR}/${sessionID}.last-ingested`, ts)
-  }
-
-  async function ingest(sessionID: string): Promise<void> {
-    const { serverUrl, authToken, vault, enabled, project } = await getSettings()
-    if (!vault || !enabled) return
-
-    const since = await readMarker(sessionID)
-
-    const result = await client.session.messages({ path: { sessionID } })
-    const messages: Array<{ info: any; parts: any[] }> = result.data ?? []
-    if (!messages.length) return
-
-    const turns: { role: string; content: string; ts: string }[] = []
-    let lastTs = ''
-
-    for (const { info, parts } of messages) {
-      if (info.role !== 'user' && info.role !== 'assistant') continue
-      const ts = new Date(info.time.created).toISOString()
-      if (since && ts <= since) continue
-
-      const text = (parts as any[])
-        .filter((p) => p.type === 'text' && !p.synthetic && !p.ignored)
-        .map((p) => p.text as string)
-        .join(' ')
-        .trim()
-      if (!text) continue
-
-      turns.push({ role: info.role, content: text, ts })
-      lastTs = ts
-    }
-
-    // Skip small sessions unless we have a prior marker (i.e. we've already ingested some)
-    if (turns.length < 4 && !since) return
-    if (turns.length < 1) return
-
-    const body: Record<string, unknown> = { project, transcript: turns }
-    if (since) body['since'] = since
-
-    const resp = await fetch(`${serverUrl}/vault/${vault}/ingest`, {
-      method: 'POST',
-      headers: { ...authHeaders(authToken), 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
-    }).catch(() => null)
-
-    if (!resp?.ok) return
-
-    if (lastTs) await writeMarker(sessionID, lastTs)
-
-    const data = (await resp.json().catch(() => null)) as {
-      saved?: { path: string; summary: string }[]
-      skipped?: number
-    } | null
-    if (data?.saved?.length) {
-      console.error(`[prunus] saved ${data.saved.length} note(s)`)
-    }
-  }
+  // Notes fetched for the latest user prompt — updated on each chat.message, read in system.transform
+  let cachedNotes: ContextNote[] = []
 
   return {
     /**
-     * Inject vault profile into the system prompt on every LLM call.
-     * OpenCode has no UserPromptSubmit/BeforeAgent equivalent, so we use the system
-     * prompt transform — the profile is always present rather than first-turn only.
-     * Profile is fetched once per plugin instance and cached.
+     * Per-prompt: extract user message text, fetch relevant notes, cache for system.transform.
+     * chat.message fires after the user message is parsed, before the LLM call.
+     */
+    'chat.message': async (
+      _input: { sessionID: string; messageID?: string },
+      output: { parts: Array<{ type: string; text?: string }> },
+    ) => {
+      const { url, token, tree, enabled } = await getSettings()
+      if (!tree || !enabled) return
+
+      const query = output.parts
+        .filter((p) => p.type === 'text' && p.text)
+        .map((p) => p.text!)
+        .join(' ')
+        .trim()
+      if (!query) return
+
+      try {
+        const resp = await fetch(`${url}/tree/${tree}/context?query=${encodeURIComponent(query)}`, {
+          headers: authHeaders(token),
+          signal: AbortSignal.timeout(8000),
+        })
+        if (!resp.ok) return
+        const data = (await resp.json()) as { notes?: ContextNote[] }
+        cachedNotes = data.notes ?? []
+      } catch {
+        cachedNotes = []
+      }
+    },
+
+    /**
+     * Inject cached notes into the system prompt for the LLM call triggered by this message.
+     * system.transform fires after chat.message for the same turn.
      */
     'experimental.chat.system.transform': async (
       _input: { sessionID?: string; model: any },
       output: { system: string[] },
     ) => {
-      const { vault, project } = await getSettings()
-      const profile = await getCachedProfile()
-      if (!profile) return
+      if (cachedNotes.length === 0) return
+      const { tree, project } = await getSettings()
+      const notesList = cachedNotes.map((n) => `- ${n.path}: ${n.summary}`).join('\n')
       output.system.push(
-        `[prunus vault="${vault}" project="${project}"]\n${profile}\nUse search_notes and read_note MCP tools to retrieve specific vault knowledge when relevant.\n[/prunus]`,
-      )
-    },
-
-    /**
-     * Ingest session transcript after each agent turn.
-     * session.idle fires when the agent finishes a response (like Claude Code's Stop).
-     * Uses client.session.messages() — no transcript file needed.
-     */
-    event: async ({ event }: { event: { type: string; properties: Record<string, any> } }) => {
-      if (event.type !== 'session.idle') return
-      const sessionID = event.properties.sessionID as string
-      if (!sessionID) return
-      await ingest(sessionID).catch(() => {})
-    },
-
-    /**
-     * Inject vault profile into the compaction context.
-     * Ensures the profile is preserved across context window resets.
-     */
-    'experimental.session.compacting': async (
-      _input: { sessionID: string },
-      output: { context: string[]; prompt?: string },
-    ) => {
-      const { vault, project } = await getSettings()
-      const profile = await getCachedProfile()
-      if (!profile) return
-      output.context.push(
-        `[prunus vault="${vault}" project="${project}"]\n${profile}\nUse search_notes and read_note MCP tools to retrieve specific vault knowledge when relevant.\n[/prunus]`,
+        `[prunus tree="${tree}" project="${project}"]\nRelevant tree notes — use read_note MCP tool to retrieve full content:\n${notesList}\n[/prunus]`,
       )
     },
   }

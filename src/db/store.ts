@@ -1,5 +1,5 @@
 export interface NoteParams {
-  vault: string
+  tree: string
   path: string
   id: string
   summary: string
@@ -25,7 +25,7 @@ export interface SearchResult {
 }
 
 export interface SearchParams {
-  vault: string
+  tree: string
   queryEmbedding: number[]
   query: string
   limit: number
@@ -39,16 +39,16 @@ export interface Store {
   close(): Promise<void>
 
   upsertNote(p: NoteParams): Promise<void>
-  deleteNote(vault: string, path: string): Promise<void>
-  getNoteByPath(vault: string, path: string): Promise<NoteRecord | null>
-  getNoteById(id: string): Promise<{ vault: string; path: string } | null>
+  deleteNote(tree: string, path: string): Promise<void>
+  getNoteByPath(tree: string, path: string): Promise<NoteRecord | null>
+  getNoteById(id: string): Promise<{ tree: string; path: string } | null>
   searchNotes(p: SearchParams): Promise<SearchResult[]>
-  searchNotesFts(vault: string, query: string, limit: number): Promise<SearchResult[]>
-  getNotesNeedingReindex(currentModel: string): Promise<Array<{ vault: string; path: string }>>
-  checkDuplicate(vault: string, embed: number[], threshold: number): Promise<boolean>
+  searchNotesFts(tree: string, query: string, limit: number): Promise<SearchResult[]>
+  getNotesNeedingSurvey(currentModel: string): Promise<Array<{ tree: string; path: string }>>
+  checkDuplicate(tree: string, embed: number[], threshold: number): Promise<boolean>
 
-  resolveNoteTarget(vault: string, target: string): Promise<string | null>
+  resolveNoteTarget(tree: string, target: string): Promise<string | null>
   upsertLinks(sourceId: string, targets: Array<{ targetId: string; type: string }>): Promise<void>
-  getNoteEmbed(vault: string, path: string): Promise<number[] | null>
-  getSourcesLinkingTo(targetId: string): Promise<Array<{ id: string; vault: string; path: string }>>
+  getNoteEmbed(tree: string, path: string): Promise<number[] | null>
+  getSourcesLinkingTo(targetId: string): Promise<Array<{ id: string; tree: string; path: string }>>
 }
