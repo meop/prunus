@@ -13,7 +13,7 @@ Each client does two things:
 
 2. **Knowledge capture** — the user explicitly invokes `/prunus ingest [guidance]` at a meaningful point in the session.
    The session AI composes a curated summary document (capturing conclusions, decisions, validated approaches — not dead
-   ends or abandoned attempts) and sends it to prunus via the `contribute` MCP tool. The server LLM extracts and files
+   ends or abandoned attempts) and sends it to prunus via the `update_notes` MCP tool. The server LLM extracts and files
    the knowledge.
 
 ## Feature Matrix
@@ -57,7 +57,7 @@ Installed as a markdown slash command in each tool's commands directory. Support
 
 - `/prunus status` — show effective merged settings for the current directory
 - `/prunus init` — create or update `.prunus/settings.json` for the current project
-- `/prunus ingest [guidance]` — compose a curated summary document from the current session and send via `contribute`
+- `/prunus update [guidance]` — compose a curated summary document from the current session and send via `update_notes`
   MCP tool. `guidance` is optional free text that shapes what the document covers.
 
 The command file is transformed at install time:

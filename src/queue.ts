@@ -114,7 +114,7 @@ export async function initQueue(): Promise<void> {
 
 export async function surveyStaleNotes(): Promise<void> {
   try {
-    const notes = await getStore().getNotesNeedingReindex(SETTINGS.llm.embed.model)
+    const notes = await getStore().getNotesNeedingSurvey(SETTINGS.llm.embed.model)
     if (notes.length > 0) {
       log.info('queue', `re-queuing ${notes.length} note(s) with missing/stale embeddings`)
       for (const { tree, path } of notes) enqueue({ type: 'survey', tree, path })

@@ -131,7 +131,12 @@ async function findProfileFile(name: string): Promise<string | null> {
 
 export async function disableProfile(tree: string, name: string): Promise<void> {
   const target = join(SETTINGS.grove.path, tree, '.profiles', `${name}.md`)
-  await Deno.remove(target).catch(() => {
-    throw new Error(`profile "${name}" not enabled`)
-  })
+  try {
+    await Deno.remove(target)
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) {
+      throw new Error(`profile "${name}" not enabled`)
+    }
+    throw err
+  }
 }

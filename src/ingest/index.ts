@@ -90,7 +90,7 @@ export async function updateTree(tree: string, req: UpdateTreeRequest): Promise<
   }
 }
 
-function parseChunks(text: string): Chunk[] {
+export function parseChunks(text: string): Chunk[] {
   const match = text.match(/\[[\s\S]*\]/)
   if (!match) return []
   try {

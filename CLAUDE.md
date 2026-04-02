@@ -6,7 +6,7 @@ A centralized knowledge store exposed via MCP over HTTP. Clients (AI coding assi
 a single shared server to read and write curated insights.
 
 Knowledge is captured explicitly: the client AI composes a summary document from the current session at a meaningful
-moment and sends it via the `update_tree` MCP tool. The server's LLM then extracts, deduplicates, and saves notes from
+moment and sends it via the `update_notes` MCP tool. The server's LLM then extracts, deduplicates, and saves notes from
 that prepared document. On each prompt, a per-prompt hook queries the server for relevant notes and injects their
 summaries as context so the session AI knows what to look up via MCP.
 
@@ -14,17 +14,17 @@ See `docs/CLIENTS.md` for all client-specific details (hook events, plugin API, 
 
 ## Naming (Arborist Metaphor)
 
-| Term    | Meaning                                                           |
-| ------- | ----------------------------------------------------------------- |
-| grove   | The root directory that holds all trees                           |
+| Term    | Meaning                                                            |
+| ------- | ------------------------------------------------------------------ |
+| grove   | The root directory that holds all trees                            |
 | tree    | A named knowledge domain within the grove — has notes and profiles |
-| note    | A single Markdown file within a tree                              |
-| grow    | LLM agent integrating a new knowledge chunk into a tree           |
-| shape   | LLM agent reorganizing a whole tree (periodic, every N grows)     |
-| heal    | LLM agent propagating a change to related notes                   |
-| prune   | Mechanical removal of a note and its dead links from a tree       |
-| survey  | Mechanical re-embed + upsert DB + resolve wikilinks for a note    |
-| profile | Capture criteria — tells the updateTree LLM what is worth keeping |
+| note    | A single Markdown file within a tree                               |
+| grow    | LLM agent integrating a new knowledge chunk into a tree            |
+| shape   | LLM agent reorganizing a whole tree (periodic, every N grows)      |
+| heal    | LLM agent propagating a change to related notes                    |
+| prune   | Mechanical removal of a note and its dead links from a tree        |
+| survey  | Mechanical re-embed + upsert DB + resolve wikilinks for a note     |
+| profile | Capture criteria — tells the updateTree LLM what is worth keeping  |
 
 ## Development Commands
 
@@ -137,17 +137,19 @@ src/
     server.ts
     tools/
       index.ts
-      tree/
-        create.ts
-        delete.ts
-        list.ts
+      note/
+        create.ts          # tool name: create_note
+        delete.ts          # tool name: delete_note
         read.ts            # tool name: read_note
+        update.ts          # tool name: update_note
+      notes/
+        list.ts            # tool name: list_notes
         search.ts          # tool name: search_notes
-        update.ts          # update_tree MCP tool — fire-and-forget → ingest pipeline
+        update.ts          # tool name: update_notes — fire-and-forget → ingest pipeline
       profile/
-        disable.ts
-        enable.ts
-        list.ts
+        disable.ts         # tool name: disable_profile
+        enable.ts          # tool name: enable_profile
+        list.ts            # tool name: list_profiles
     transport.ts      # Stateless RequestTransport for Deno.serve
 
 src/cli/                # Installed on each client machine; config lives in ~/.prunus/
@@ -187,21 +189,24 @@ deno run --allow-all http://prunus-host:9100/cli/install
 
 | Tool              | Description                                                   |
 | ----------------- | ------------------------------------------------------------- |
-| `update_tree`     | Submit a prepared session summary document for LLM extraction |
-| `search_notes`    | Hybrid vector + FTS search across all notes in the tree       |
+| `create_note`     | Create a new note at a given path                             |
 | `read_note`       | Read a note's full Markdown content by path or ID             |
-| `list_trees`      | List available tree names                                     |
-| `create_tree`     | Create a new named tree directory                             |
-| `delete_tree`     | Delete a tree and all its contents                            |
+| `update_note`     | Update an existing note's body and summary                    |
+| `delete_note`     | Delete a note; watcher handles link cleanup and index removal |
+| `list_notes`      | List all note paths in a tree                                 |
+| `search_notes`    | Hybrid vector + FTS search across all notes in the tree       |
+| `update_notes`    | Submit a prepared session summary document for LLM extraction |
 | `list_profiles`   | List all profiles + which are enabled for a tree              |
 | `enable_profile`  | Enable a profile for a tree (creates symlink)                 |
 | `disable_profile` | Disable a profile for a tree (removes symlink)                |
 
-`update_tree` is fire-and-forget — returns `"Document received."` immediately and processes asynchronously via the queue.
+`update_notes` is fire-and-forget — returns `"Document received."` immediately and processes asynchronously via the
+queue.
 
 ## Settings
 
-Settings are loaded from `settings.toml` (symlink → `settings-dev.toml`; use `PRUNUS_ENV=test` for tests). Schema and defaults are defined in `src/stng.ts`.
+Settings are loaded from `settings.toml` (symlink → `settings-dev.toml`; use `PRUNUS_ENV=test` for tests). Schema and
+defaults are defined in `src/stng.ts`.
 
 ## Client Settings
 
@@ -216,7 +221,8 @@ If the deepest file sets `"enabled": false`, the walk stops immediately.
 
 ## Profile System
 
-Profile definitions live in `cfg/profiles/{name}.md` within the config directories specified by `cfg.dirs` in `settings.toml`.
+Profile definitions live in `cfg/profiles/{name}.md` within the config directories specified by `cfg.dirs` in
+`settings.toml`.
 
 Trees enable profiles via symlinks in `{tree}/.profiles/{name}.md → absolute path to profile definition`. The combined
 profile is passed to the `updateTree` LLM to filter what knowledge is worth extracting from submitted documents. If no
@@ -266,5 +272,5 @@ Defaults: vector weight `0.6`, fts weight `0.4`, vector gate `0.8`, dedup thresh
 3. **Profile change does not re-trigger grow** — enabling a new profile does not retroactively re-process documents
    submitted under old criteria.
 
-4. **Embed model drift mid-session** — `surveyStaleNotes` handles stale embeddings after a model change at startup,
-   but not if the model is changed while the server is running.
+4. **Embed model drift mid-session** — `surveyStaleNotes` handles stale embeddings after a model change at startup, but
+   not if the model is changed while the server is running.

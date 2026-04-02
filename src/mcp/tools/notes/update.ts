@@ -6,7 +6,7 @@ import { log } from '../../../log.ts'
 
 export function register(server: McpServer): void {
   server.tool(
-    'update_tree',
+    'update_notes',
     'Contribute a prepared session summary document to be analyzed and filed into the tree by the prunus arborist.',
     {
       tree: z.string().describe('Target tree name'),

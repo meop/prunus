@@ -2,7 +2,7 @@
 /**
  * Prunus installer — unified
  * Run locally:  deno run --allow-all install.ts [--yes/-y] [tool ...]
- * Run remotely: deno run --allow-all http://prunus-host:9100/cli/install[.ts] [--yes/-y]
+ * Run remotely: deno run --allow-all http://prunus-host:9100/cli/install[.ts] --reload [-y/--yes]
  *
  * tool: claude-code | gemini-cli | opencode | qwen-code
  * flags: -y / --yes — non-interactive, accept all defaults
@@ -60,19 +60,19 @@ function promptUpdate(path: string): boolean {
   return ask(`? update ${path} [y, [n]]:`).trim().toLowerCase() !== 'n'
 }
 
-async function promptConfig(): Promise<{ prunusUrl: string; token: string }> {
+async function promptConfig(): Promise<{ url: string; token: string }> {
   const existing = await readJsonFile(join(PRUNUS_DIR, 'settings.json'))
   const hasUrl = !!existing.url
   const defaultUrl = String(existing.url ?? 'http://localhost:9100')
   const defaultToken = String(existing.token ?? '')
   const urlSuffix = hasUrl ? ` (${existing.url}):` : ':'
-  const prunusUrl = ask(`? ${hasUrl ? 'update' : 'set'} prunus server url [http://localhost:9100]${urlSuffix}`) ||
+  const url = ask(`? set url [http://localhost:9100]${urlSuffix}`) ||
     defaultUrl
   const hasToken = !!existing.token
   const tokenSuffix = hasToken ? ' (******):' : ':'
-  const token = ask(`? ${hasToken ? 'update' : 'set'} auth token [leave empty if none]${tokenSuffix}`) ||
+  const token = ask(`? set token [leave empty if none]${tokenSuffix}`) ||
     defaultToken
-  return { prunusUrl, token }
+  return { url, token }
 }
 
 // ── file helpers ──────────────────────────────────────────────────────────────
@@ -92,7 +92,7 @@ async function writeFile(dest: string, getContent: () => Promise<string>): Promi
   } catch { /* not found */ }
   if (!isNew && !promptUpdate(dest)) return
   await Deno.writeTextFile(dest, await getContent())
-  if (isNew) console.log(`wrote ${dest}`)
+  console.log(`${isNew ? 'wrote' : 'updated'} ${dest}`)
 }
 
 async function installCommand(
@@ -221,7 +221,7 @@ if (restArgs.length > 0) {
   const detected = await defaultTools()
   const optionStr = Object.keys(TOOLS).join(' ')
   const detectedStr = detected.length ? ` (${detected.join(' ')})` : ''
-  const input = ask(`? tools [${optionStr}]${detectedStr}:`).trim()
+  const input = ask(`? set tools [${optionStr}]${detectedStr}:`).trim()
   tools = input ? parseTools(input) : detected
   if (tools.length === 0) {
     console.error('no installed tools detected and none specified')
@@ -229,8 +229,9 @@ if (restArgs.length > 0) {
   }
 }
 
-const { prunusUrl, token } = await promptConfig()
-await writeUserSettings(prunusUrl, token)
+const { url, token } = await promptConfig()
+
+await writeUserSettings(url, token)
 console.log('')
 
 for (let i = 0; i < tools.length; i++) {
@@ -264,7 +265,7 @@ for (let i = 0; i < tools.length; i++) {
     const CLAUDE_JSON = join(HOME, '.claude.json')
     const claudeJson = await readJsonFile(CLAUDE_JSON)
     const mcpServers = (claudeJson.mcpServers ?? {}) as Record<string, unknown>
-    const mcpEntry: Record<string, unknown> = { type: 'http', url: `${prunusUrl}/mcp` }
+    const mcpEntry: Record<string, unknown> = { type: 'http', url: `${url}/mcp` }
     if (token) mcpEntry.headers = { Authorization: `Bearer ${token}` }
     mcpServers.prunus = mcpEntry
     claudeJson.mcpServers = mcpServers
@@ -290,14 +291,23 @@ for (let i = 0; i < tools.length; i++) {
     const HOOKS_DIR = join(PRUNUS_DIR, 'hooks', 'gemini-cli')
     const GEMINI_SETTINGS = join(GEMINI_DIR, 'settings.json')
 
+    // Remove stale prunus.md if present from older installs
+    try {
+      await Deno.remove(join(GEMINI_DIR, 'commands', 'prunus.md'))
+      console.log(`removed stale ${join(GEMINI_DIR, 'commands', 'prunus.md')}`)
+    } catch { /* not found */ }
+
     await installCommand(
       new URL('prunus.md', BASE_URL).href,
       join(GEMINI_DIR, 'commands'),
-      (s) =>
-        s.replaceAll('$ARGUMENTS', '{{args}}').replaceAll('in Bash', 'in a shell').replaceAll(
-          'Use Bash only',
-          'Use shell only',
-        ),
+      (s) => {
+        const body = s
+          .replaceAll('$ARGUMENTS', '{{args}}')
+          .replaceAll('in Bash', 'in a shell')
+          .replaceAll('Use Bash only', 'Use shell only')
+        return `description = "Manage prunus settings for the current project"\nprompt = """\n${body}\n"""\n`
+      },
+      'prunus.toml',
     )
 
     const settings = await readJsonFile(GEMINI_SETTINGS)
@@ -314,7 +324,7 @@ for (let i = 0; i < tools.length; i++) {
 
     // Gemini CLI uses httpUrl for StreamableHTTP MCP servers
     const mcpServers = (settings.mcpServers ?? {}) as Record<string, unknown>
-    const mcpEntry: Record<string, unknown> = { httpUrl: `${prunusUrl}/mcp` }
+    const mcpEntry: Record<string, unknown> = { httpUrl: `${url}/mcp` }
     if (token) mcpEntry.headers = { Authorization: `Bearer ${token}` }
     mcpServers.prunus = mcpEntry
     settings.mcpServers = mcpServers
@@ -347,7 +357,7 @@ for (let i = 0; i < tools.length; i++) {
     // OpenCode uses "mcp" key (not "mcpServers") with type: "remote" for HTTP servers.
     // The plugin is auto-discovered from the plugins/ directory — no explicit registration needed.
     const config = await readJsonFile(OPENCODE_JSON)
-    const mcpEntry: Record<string, unknown> = { type: 'remote', url: `${prunusUrl}/mcp` }
+    const mcpEntry: Record<string, unknown> = { type: 'remote', url: `${url}/mcp` }
     if (token) mcpEntry.headers = { Authorization: `Bearer ${token}` }
     const mcp = (config.mcp ?? {}) as Record<string, unknown>
     mcp.prunus = mcpEntry
@@ -390,7 +400,7 @@ for (let i = 0; i < tools.length; i++) {
 
     // Qwen-Code is a Gemini CLI fork; httpUrl selects StreamableHTTP transport
     const mcpServers = (settings.mcpServers ?? {}) as Record<string, unknown>
-    const mcpEntry: Record<string, unknown> = { httpUrl: `${prunusUrl}/mcp` }
+    const mcpEntry: Record<string, unknown> = { httpUrl: `${url}/mcp` }
     if (token) mcpEntry.headers = { Authorization: `Bearer ${token}` }
     mcpServers.prunus = mcpEntry
     settings.mcpServers = mcpServers

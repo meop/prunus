@@ -5,7 +5,7 @@ export async function getHealth() {
   const { getStore } = await import('./db/index.ts')
   let dbStatus = 'disconnected'
   try {
-    await getStore().getNotesNeedingReindex('__health_probe__')
+    await getStore().getNotesNeedingSurvey('__health_probe__')
     dbStatus = 'connected'
   } catch (_e) { /* not ready */ }
 

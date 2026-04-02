@@ -11,7 +11,7 @@ function parse(body: string): { main: string; links: string[] } {
 
 function format(main: string, links: string[]): string {
   if (links.length === 0) return main
-  return main.trimEnd() + SECTION + links.map((l) => `- [[${l}]]`).format('\n') + '\n'
+  return main.trimEnd() + SECTION + links.map((l) => `- [[${l}]]`).join('\n') + '\n'
 }
 
 export function getSeeAlsoLinks(body: string): string[] {

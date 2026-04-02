@@ -8,9 +8,9 @@ and are surfaced via MCP during future sessions across all your machines and too
 **Capturing knowledge** — explicit, curated:
 
 ```
-/prunus ingest "focus on the architectural decisions"
+/prunus update "focus on the architectural decisions"
   └─ Session AI composes a summary document from the current session context
-       └─ Sends document to prunus via contribute MCP tool
+       └─ Sends document to prunus via update_notes MCP tool
             └─ Server LLM extracts distinct knowledge chunks from the document
                  └─ Dedup check against existing tree → save as Markdown → index
 ```
@@ -40,12 +40,13 @@ The database is derived from the grove and fully rebuildable by rescanning.
 
 | Tool              | Description                                                   |
 | ----------------- | ------------------------------------------------------------- |
-| `contribute`      | Submit a prepared session summary document for LLM extraction |
-| `search_notes`    | Hybrid vector + FTS search across all notes in the tree       |
+| `create_note`     | Create a new note at a given path                             |
 | `read_note`       | Read a note's full Markdown content by path or ID             |
-| `list_trees`      | List available tree names                                     |
-| `create_tree`     | Create a new named tree directory                             |
-| `delete_tree`     | Delete a tree and all its contents                            |
+| `update_note`     | Update an existing note's body and summary                    |
+| `delete_note`     | Delete a note; watcher handles link cleanup and index removal |
+| `list_notes`      | List all note paths in a tree                                 |
+| `search_notes`    | Hybrid vector + FTS search across all notes in the tree       |
+| `update_notes`    | Submit a prepared session summary document for LLM extraction |
 | `list_profiles`   | List all profiles + which are enabled for a tree              |
 | `enable_profile`  | Enable a profile for a tree                                   |
 | `disable_profile` | Disable a profile for a tree                                  |

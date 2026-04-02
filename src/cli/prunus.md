@@ -10,25 +10,36 @@ not modify those fields here.
 {
   "enabled": true,
   "project": "optional-name-override",
-  "grove": "code"
+  "tree": "code"
 }
 ```
 
 **Settings discovery rule (used by both commands):**
 
-Run this in Bash to collect all settings files, deepest-first:
+Build an ordered list of settings files as follows:
 
-```bash
-dir=$(pwd); while [ "$dir" != "/" ]; do test -f "$dir/.prunus/settings.json" && echo "$dir/.prunus/settings.json"; dir=$(dirname "$dir"); done
-```
+1. Starting from `$CWD`, walk up the directory tree one level at a time. At each directory `$DIR`, attempt to read
+   `$DIR/.prunus/settings.json`. If it succeeds, append that path to the list. If the file does not exist, skip it. To
+   get the parent of `$DIR`, run: `deno eval "import{dirname}from'jsr:@std/path';console.log(dirname('$DIR'))"` — stop
+   when the result equals `$DIR` (reached filesystem root).
+2. After the traversal, attempt to read `$HOME/.prunus/settings.json`. If it succeeds, append it to the list. **Always
+   use the resolved `$HOME` value — never use `~` in file paths.**
 
-Read each file in the order returned and merge them: for each key, the value from the first (deepest) file that defines
-it wins. If the deepest file explicitly sets `"enabled": false`, stop — prunus is disabled, ignore remaining files. If
-no files are found, the result is "no settings found".
+The result is a list ordered deepest-first: the file closest to cwd is first, and `$HOME/.prunus/settings.json` is last.
+
+Merge the list in order: for each key, the value from the first file in the list that defines it wins. Files later in
+the list (further from cwd, including `$HOME/.prunus/settings.json`) are lower priority and only supply values not
+already set by an earlier file. Always merge all files completely. If the list is empty, there are no settings.
 
 **Steps — read $ARGUMENTS and act accordingly:**
 
-First, run `pwd` in Bash to get the current working directory. Then:
+First, run these two commands to resolve the current and home directories (Deno is cross-platform and always available
+on prunus clients):
+
+- `deno eval "console.log(Deno.cwd())"` → store as `$CWD`
+- `deno eval "console.log(Deno.env.get('HOME') ?? Deno.env.get('USERPROFILE'))"` → store as `$HOME`
+
+Use these resolved values everywhere below — never use `~` or unresolved shell variables in file paths. Then:
 
 ---
 
@@ -40,18 +51,17 @@ Print: `usage: /prunus <command>` followed by the available commands: `init`, `s
 
 **"status":**
 
-1. Apply the settings discovery rule, collecting all settings files found
-2. Read `~/.prunus/settings.json` for user settings
-3. If no settings files found, print "no settings found" and stop
-4. If more than one settings file was found, print the list of paths in traversal order (deepest first)
-5. Print all fields as a table with three columns: key, set, and value — sorted alphabetically by key. Always show every
+1. Apply the settings discovery rule to build the merged settings
+2. If the list is empty, print "no settings found" and stop
+3. Print the paths of all files in the list
+4. Print all fields as a table with three columns: key, set, and value — sorted alphabetically by key. Always show every
    field. The `set` column is `yes` if the field is explicitly present in the merged settings, `no` if falling back to a
    default. Default values to display when not set:
    - `enabled` → `true`
-   - `project` → directory name of the settings file location
-   - `token` → `""`
+   - `project` → name of the directory containing the `.prunus/` folder of the deepest project-level settings file
+   - `token` → `""` — mask as `******` if set
    - `url` → `http://localhost:9100`
-   - `grove` → `""` Mask `token` as `******` if set.
+   - `tree` → `""`
 
 ---
 
@@ -59,50 +69,47 @@ Print: `usage: /prunus <command>` followed by the available commands: `init`, `s
 
 **Phase 1 — locate or create settings file:**
 
-1. Apply the settings discovery rule
-2. If an active settings file is found, use it and skip to Phase 2
-3. If none found, prompt: `? create settings file [<cwd>/.prunus/settings.json]:`
-   - Enter accepts the default path; user may type a different path
-   - `mkdir -p` the `.prunus` directory, start with `{}`
+1. Walk up from `$CWD` toward the root; attempt to read `$DIR/.prunus/settings.json` at each level (do not include
+   `$HOME/.prunus/settings.json`). Use the same parent-resolution and stop condition as the discovery rule above.
+2. If any were found, use the first (deepest) one as the file to edit and skip to Phase 2
+3. If none found, create a new settings file:
+   - Default path: `$CWD/.prunus/settings.json` — the client may offer this as a default or let the user specify a
+     different path
+   - Run `deno eval "await Deno.mkdir('PATH/.prunus',{recursive:true})"` to create the directory, then write `{}` as the
+     initial file contents
 
-**Phase 2 — prompt for each field:**
+**Phase 2 — collect field values from the user:**
 
 For each field, check if the key exists in the current JSON. Use `set` if absent, `update` if present.
 
-Prompt style mirrors the installer — `?` prefix, `[default]` for suggested value, `(current)` for existing value:
+The client should collect these values from the user in its own UI style (menu, prompts, form, etc.). Required fields
+must be provided; optional fields may be omitted.
 
-1. **grove** (mandatory):
-   - Call `mcp__prunus__list_trees` and extract grove names
-   - Display as a numbered list
-   - If key absent: `? set grove [1] (<grove-name>):` — default is item 1
-   - If key present: `? update grove (<current-grove>):` — show numbered list above, enter keeps current
-   - Re-prompt if input is not a valid number or name
+1. **tree** (mandatory):
+   - Ask the user to enter the tree name (e.g. `code`, `recipe`)
+   - If key absent: no default; the user must supply a value
+   - If key present: show the current value as the default
 
 2. **project** (optional):
-   - If key absent: `? set project name [leave empty to omit]:`
-     - Enter omits the key entirely
-   - If key present: `? update project name (<current>):`
-     - Enter keeps the current value
+   - If key absent: user may provide a value or leave empty to omit the key
+   - If key present: user may provide a new value or keep the current one
 
 3. **enabled** (optional, absent = enabled):
-   - If key absent: `? set enabled [y, [n]]:` — enter leaves key absent (enabled by default)
-   - If key present and true: `? update enabled [y, [n]]:`
-   - If key present and false: `? update enabled [n, [y]]:`
-   - Enter keeps existing state; only write the key if user explicitly answers
+   - If key absent: user may explicitly set to `false`; otherwise leave the key absent (enabled by default)
+   - If key present: user may change the value or keep the current one
 
 **Phase 3 — write and confirm:**
 
-1. Write the updated JSON with 2-space indent, keys sorted alphabetically, preserving any keys not touched above
+1. Write the updated JSON to the settings file with 2-space indent, keys sorted alphabetically, preserving any keys not
+   touched above
 2. Show the final file contents
 3. Remind the user to restart the tool for changes to take effect
 
 ---
 
----
-
 **"update [guidance]":**
 
-1. Apply the settings discovery rule to get the merged settings; also read `~/.prunus/settings.json` for user settings
+1. Apply the settings discovery rule to build the merged settings
 2. If `enabled` is false or `tree` is empty, print "prunus is disabled for this project" and stop
 3. Compose a summary document from the current session context:
    - Capture decisions made, approaches validated, conclusions reached, and important technical details discovered
@@ -111,10 +118,11 @@ Prompt style mirrors the installer — `?` prefix, `[default]` for suggested val
    - If `guidance` is provided, use it to focus or shape what the document covers
    - Write in clear, factual prose — not as a dialogue or transcript
    - Include enough context in each section that a reader unfamiliar with this session can understand the insight
-4. Call `mcp__prunus__update_tree` with `{tree, project, document: <the summary>}`
+4. Call `mcp__prunus__update_notes` with `{tree: <tree from merged settings>, project, document: <the summary>}`
 5. Print: `sent to prunus`
 
 ---
 
-Use the Read and Write tools for all file operations. Use Bash only for `pwd` and `mkdir -p`. Preserve existing keys
-when updating — only change keys the user explicitly answered.
+Use `deno eval` for all shell operations (`$CWD`, `$HOME`, parent-directory resolution, directory creation) — Deno is
+cross-platform and available on all prunus clients. Preserve existing keys when updating — only change keys the user
+explicitly answered.
