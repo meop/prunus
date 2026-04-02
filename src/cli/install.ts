@@ -2,7 +2,7 @@
 /**
  * Prunus installer — unified
  * Run locally:  deno run --allow-all install.ts [--yes/-y] [tool ...]
- * Run remotely: deno run --allow-all http://prunus-host:9100/cli/install[.ts] --reload [-y/--yes]
+ * Run remotely: deno run --allow-all --reload http://prunus-host:9100/cli/install[.ts] [-y/--yes]
  *
  * tool: claude-code | gemini-cli | opencode | qwen-code
  * flags: -y / --yes — non-interactive, accept all defaults
