@@ -22,7 +22,7 @@ path = '/vol/note/prunus'
 # password = 'postgres'
 
 [llm]
-hostname = 'arch.lan'
+hostname = 'host.lan'
 port = 1234
 
 [llm.chat]
@@ -34,7 +34,7 @@ model = 'text-embedding-bge-m3'
 dimension = 1024
 
 [cfg]
-dirs = ['prunus-config']
+dir = './cfg'
 
 [grove]
 path = '/data/note/prunus'

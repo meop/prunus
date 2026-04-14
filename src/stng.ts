@@ -3,7 +3,7 @@ import { parse } from '@std/toml'
 
 export interface Stng {
   cfg: {
-    dirs: string[]
+    dir: string
   }
   db: {
     postgres: {
@@ -68,7 +68,7 @@ const raw = parse(await Deno.readTextFile(settingsPath)) as any
 
 export const SETTINGS: Stng = {
   cfg: {
-    dirs: raw.cfg?.dirs ?? [],
+    dir: Deno.env.get('PRUNUS_CFG_DIR') ?? raw.cfg?.dir ?? './cfg',
   },
   db: {
     postgres: {

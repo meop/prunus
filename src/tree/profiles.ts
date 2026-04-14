@@ -1,6 +1,6 @@
 import { join } from '@std/path'
 
-import { profilesDirs } from '../cfg.ts'
+import { profilesDir } from '../cfg.ts'
 import { SETTINGS } from '../stng.ts'
 import { log } from '../log.ts'
 
@@ -80,15 +80,13 @@ export async function loadProfile(tree: string): Promise<string> {
 }
 
 export async function listProfileNames(): Promise<string[]> {
-  const names = new Set<string>()
-  for (const dir of profilesDirs) {
-    try {
-      for await (const entry of Deno.readDir(dir)) {
-        if (entry.isFile && entry.name.endsWith('.md')) names.add(entry.name.replace(/\.md$/, ''))
-      }
-    } catch { /* dir may not exist */ }
-  }
-  return [...names].sort()
+  const names: string[] = []
+  try {
+    for await (const entry of Deno.readDir(profilesDir)) {
+      if (entry.isFile && entry.name.endsWith('.md')) names.push(entry.name.replace(/\.md$/, ''))
+    }
+  } catch { /* dir may not exist */ }
+  return names.sort()
 }
 
 export async function listEnabledProfiles(tree: string): Promise<string[]> {
@@ -119,13 +117,11 @@ export async function enableProfile(tree: string, name: string): Promise<void> {
 }
 
 async function findProfileFile(name: string): Promise<string | null> {
-  for (const dir of profilesDirs) {
-    const candidate = join(dir, `${name}.md`)
-    try {
-      await Deno.stat(candidate)
-      return candidate
-    } catch { /* not found */ }
-  }
+  const candidate = join(profilesDir, `${name}.md`)
+  try {
+    await Deno.stat(candidate)
+    return candidate
+  } catch { /* not found */ }
   return null
 }
 

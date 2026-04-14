@@ -2,6 +2,8 @@ import { join } from '@std/path'
 
 import { SETTINGS } from './stng.ts'
 
-const cfgDirPaths = SETTINGS.cfg.dirs.map((dir) => join(import.meta.dirname ?? '', '..', '..', dir, 'cfg')).reverse()
+const cfgBasePath = SETTINGS.cfg.dir.startsWith('/')
+  ? SETTINGS.cfg.dir
+  : join(import.meta.dirname ?? '', '..', SETTINGS.cfg.dir)
 
-export const profilesDirs = cfgDirPaths.map((dir) => join(dir, 'profiles'))
+export const profilesDir = join(cfgBasePath, 'profiles')
