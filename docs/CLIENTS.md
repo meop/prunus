@@ -1,6 +1,6 @@
 # Clients
 
-Client-side integration details for all supported AI coding tools. See `CLAUDE.md` for server architecture, MCP tools,
+Client-side integration details for all supported AI coding tools. See `AGENTS.md` for server architecture, MCP tools,
 and settings schema.
 
 ## Overview
