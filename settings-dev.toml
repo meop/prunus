@@ -12,7 +12,7 @@ level = 'debug'
 type = 'sqlite'
 
 [db.sqlite]
-path = '/vol/note/prunus'
+path = '/vol/notes/prunus'
 
 # [db.postgres]
 # hostname = 'arch.lan'
@@ -37,7 +37,7 @@ dimension = 1024
 dir = './cfg'
 
 [grove]
-path = '/data/note/prunus'
+path = '/data/notes/prunus'
 
 # [search.dedup]
 # threshold = 0.85
