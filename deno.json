@@ -5,6 +5,10 @@
     "singleQuote": true,
     "trailingCommas": "onlyMultiLine"
   },
+  "minimumDependencyAge": {
+    "age": "P1D",
+    "exclude": ["jsr:@meop/*"]
+  },
   "imports": {
     "@db/postgres": "jsr:@db/postgres@^0.19.5",
     "@db/sqlite": "jsr:@db/sqlite@^0.13.0",
