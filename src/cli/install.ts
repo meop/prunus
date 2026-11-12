@@ -291,6 +291,12 @@ for (let i = 0; i < tools.length; i++) {
     const HOOKS_DIR = join(PRUNUS_DIR, 'hooks', 'gemini-cli')
     const GEMINI_SETTINGS = join(GEMINI_DIR, 'settings.json')
 
+    // Remove stale prunus.md if present from older installs
+    try {
+      await Deno.remove(join(GEMINI_DIR, 'commands', 'prunus.md'))
+      console.log(`removed stale ${join(GEMINI_DIR, 'commands', 'prunus.md')}`)
+    } catch { /* not found */ }
+
     await installCommand(
       new URL('prunus.md', BASE_URL).href,
       join(GEMINI_DIR, 'commands'),
